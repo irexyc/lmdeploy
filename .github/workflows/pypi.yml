@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: 'prod'
     needs:
-      - build
+      - windows-build
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v3
