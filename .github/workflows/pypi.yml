@@ -3,7 +3,7 @@ name: publish to pypi
 on:
   push:
     branches:
-      - *
+      -*
   workflow_dispatch:
 
 
