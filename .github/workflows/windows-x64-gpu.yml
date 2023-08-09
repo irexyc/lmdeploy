@@ -1,7 +1,6 @@
 name: windows-x64-gpu
 on:
   pull_request:
-    branches: [master]
     paths:
       - '.github/workflows/windows-x64-gpu.yml'
       - 'src/**'
