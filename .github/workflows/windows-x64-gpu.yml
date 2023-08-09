@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  cuda-11.8:
+  cuda-11-8:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
