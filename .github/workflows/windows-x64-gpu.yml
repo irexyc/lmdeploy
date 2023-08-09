@@ -1,6 +1,7 @@
 name: windows-x64-gpu
 on:
   pull_request:
+    branches: [master]
     paths:
       - '.github/workflows/windows-x64-gpu.yml'
       - 'src/**'
@@ -16,7 +17,7 @@ permissions:
   contents: read
 
 jobs:
-  cuda-11-8:
+  cuda-118:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
