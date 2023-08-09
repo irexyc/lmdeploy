@@ -1,6 +1,7 @@
 name: linux-x64-gpu
 on:
   pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/linux-x64-gpu.yml'
       - 'src/**'
