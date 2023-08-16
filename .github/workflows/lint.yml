@@ -12,16 +12,14 @@ permissions:
 jobs:
   cuda-118:
     runs-on: ubuntu-latest
+    container: openmmlab/lmdeploy-builder:cuda11.8
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
       - name: Build
         run: |
-          export GIT_REMOTE=$(git remote get-url origin)
-          export GIT_BRANCH=$(git branch --show-current)
-          echo ${GITHUB_REPOSITORY}
-          echo ${GIT_REMOTE}
-          echo ${GIT_BRANCH}
-          echo ${{ github.event.pull_request.head.sha }}
+          source /opt/conda/bin/activate
+          conda activate py38
+          mkdir build && cd build
+          bash ../generate.sh
+          make -j$(nproc) && make install
