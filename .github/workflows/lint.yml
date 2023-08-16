@@ -14,7 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Build
         run: |
           export GIT_REMOTE=$(git remote get-url origin)
@@ -22,4 +24,4 @@ jobs:
           echo ${GITHUB_REPOSITORY}
           echo ${GIT_REMOTE}
           echo ${GIT_BRANCH}
-          pwd
+          echo ${{ github.event.pull_request.head.sha }}
