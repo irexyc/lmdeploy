@@ -21,7 +21,7 @@
 #include <assert.h>
 #include <float.h>
 #include <type_traits>
-
+sdf
 #include "decoder_masked_multihead_attention_template.cuh"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -39,11 +39,11 @@
                                             HAS_BEAMS,                                                                 \
                                             QUANT_POLICY><<<grid, THDS_PER_BLOCK, smem_sz, stream>>>(params)
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// !!! Specialize the launcher for Cross attention
-template<typename T, int Dh, int Dh_MAX, typename KERNEL_PARAMS_TYPE>
-void mmha_launch_kernel(const KERNEL_PARAMS_TYPE& params, const cudaStream_t& stream)
+    // !!! Specialize the launcher for Cross attention
+    template<typename T, int Dh, int Dh_MAX, typename KERNEL_PARAMS_TYPE>
+    void mmha_launch_kernel(const KERNEL_PARAMS_TYPE& params, const cudaStream_t& stream)
 {
     constexpr int THREADS_PER_VALUE = threads_per_value_t<T, Dh_MAX>::value;
     // constexpr bool DO_CROSS_ATTENTION = std::is_same<KERNEL_PARAMS_TYPE, Cross_multihead_attention_params<T>>::value;
