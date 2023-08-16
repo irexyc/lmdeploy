@@ -22,3 +22,4 @@ jobs:
           echo ${GITHUB_REPOSITORY}
           echo ${GIT_REMOTE}
           echo ${GIT_BRANCH}
+          pwd
