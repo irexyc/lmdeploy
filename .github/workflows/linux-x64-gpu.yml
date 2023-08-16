@@ -1,7 +1,7 @@
 name: linux-x64-gpu
 on:
   push:
-    branches: [main]
+    # branches: [main]
     paths:
       - '.github/workflows/linux-x64-gpu.yml'
       - 'src/**'
