@@ -14,9 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+        uses: actions/checkout@v2
       - name: Build
         run: |
           export GIT_REMOTE=$(git remote get-url origin)
