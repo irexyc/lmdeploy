@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        required: true
+        required: false
         description: 'tag_name, set this parameter carefully, empty means use git tag'
         type: string
         default: ''
