@@ -6,9 +6,9 @@ on:
       - '*'
   workflow_dispatch:
     inputs:
-      tag_name:
+      tag:
         required: true
-        description: 'tag_name, set this parameter carefully, empty means use git tag'
+        description: 'tag, set this parameter carefully, empty means use git tag'
         type: string
         default: ''
 
@@ -119,5 +119,5 @@ jobs:
         uses: ncipollo/release-action@v1
         # if: startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: ${{github.event.inputs.image_tag}}
+          tag: ${{github.event.inputs.tag}}
           files: abc.txt
