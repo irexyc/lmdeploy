@@ -6,9 +6,9 @@ on:
       - '*'
   workflow_dispatch:
     inputs:
-      tag:
+      tag_name:
         required: true
-        description: 'tag, set this parameter carefully, empty means use git tag'
+        description: 'tag_name, set this parameter carefully, empty means use git tag'
         type: string
         default: ''
 
@@ -116,8 +116,8 @@ jobs:
         run: |
           touch abc.txt
       - name: Publish
-        uses: ncipollo/release-action@v1
+        uses: softprops/action-gh-release@v1
         # if: startsWith(github.ref, 'refs/tags/')
         with:
-          tag: ${{github.event.inputs.tag}}
+          tag_name: ${{github.event.inputs.tag_name}}
           files: abc.txt
