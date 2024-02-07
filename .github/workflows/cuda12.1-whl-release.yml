@@ -124,6 +124,8 @@ jobs:
           else
             echo "TAG_NAME=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
           fi
+          echo ${{ github.ref_type }}
+          echo "--"
           echo ${{ github.ref_name }}
           echo "--"
           echo ${{ github.event.inputs.tag_name }}
