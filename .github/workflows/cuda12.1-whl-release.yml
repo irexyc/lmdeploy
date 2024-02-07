@@ -115,9 +115,17 @@ jobs:
       - name: create
         run: |
           echo "world" > abc.txt
+      - name: Get tag name
+        id: get-tag-name
+        run: |
+          if [ -z "${{github.event.inputs.tag_name}}" ]
+          then
+            echo "TAG_NAME=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "TAG_NAME=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish
         uses: softprops/action-gh-release@v1
-        # if: startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: ${{github.event.inputs.tag_name}}
+          tag_name: ${{ steps.get-tag-name.outputs.TAG_NAME }}
           files: abc.txt
