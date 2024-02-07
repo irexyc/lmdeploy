@@ -118,12 +118,13 @@ jobs:
       - name: Get tag name
         id: get-tag-name
         run: |
-          if [ -z "${{github.event.inputs.tag_name}}" ]
-          then
-            echo "TAG_NAME=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
+          if [ -n "${{github.event.inputs.tag_name}}" ]; then
             echo "TAG_NAME=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_type }}" -eq "tag" ]; then
+            echo "TAG_NAME=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
+          echo $TAG_NAME
+          echo "--"
           echo ${{ github.ref_type }}
           echo "--"
           echo ${{ github.ref_name }}
