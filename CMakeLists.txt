@@ -310,6 +310,7 @@ if (MSVC)
     CMAKE_CUDA_FLAGS_MINSIZEREL
     CMAKE_CUDA_FLAGS_RELWITHDEBINFO)
     string(REGEX REPLACE "-Wall" " /W0 " ${flag_var} "${${flag_var}}")
+  endforeach()
 endif()
 
 if (BUILD_MULTI_GPU)
