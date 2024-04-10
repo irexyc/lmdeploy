@@ -43,6 +43,7 @@ def get_model_from_config(model_dir: str):
         'BaiChuanForCausalLM': 'baichuan',  # Baichuan-7B
         'BaichuanForCausalLM': 'baichuan2',  # not right for Baichuan-13B-Chat
         'QWenLMHeadModel': 'qwen',
+        'InternLMXComposerForCausalLM': default,
     }
 
     arch = 'LlamaForCausalLM'
