@@ -4,7 +4,7 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    - cron:  '00 20 * * 0-4'
+    - cron: '00 20 * * 0-4'
 
 jobs:
   linux-build:
@@ -18,41 +18,39 @@ jobs:
       DOCKER_TAG: cuda12.1
       OUTPUT_FOLDER: cuda12.1_dist
     steps:
-      # - name: Free disk space
-      #   uses: jlumbroso/free-disk-space@main
-      #   with:
-      #     # This might remove tools that are actually needed, if set to "true" but frees about 6 GB
-      #     tool-cache: false
-      #     docker-images: false
-      #     # All of these default to true, but feel free to set to "false" if necessary for your workflow
-      #     android: true
-      #     dotnet: true
-      #     haskell: true
-      #     large-packages: true
-      #     swap-storage: false
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # This might remove tools that are actually needed, if set to "true" but frees about 6 GB
+          tool-cache: false
+          docker-images: false
+          # All of these default to true, but feel free to set to "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: false
       - name: Checkout repository
         uses: actions/checkout@v3
       - name: Build
         id: build
         run: |
-          mkdir dummy_folder
-          echo "dummy" >> dummy_folder/text-${{ matrix.pyver }}.txt
-          filename=$(ls dummy_folder/)
+          echo ${PYTHON_VERSION}
+          echo ${PLAT_NAME}
+          echo ${DOCKER_TAG}
+          echo ${OUTPUT_FOLDER}
+          # remove -it
+          sed -i 's/docker run --rm -it/docker run --rm/g' builder/manywheel/build_wheel.sh
+          bash builder/manywheel/build_wheel.sh ${PYTHON_VERSION} ${PLAT_NAME} ${DOCKER_TAG} ${OUTPUT_FOLDER}
+          # filename
+          filename=$(ls builder/manywheel/${{ env.OUTPUT_FOLDER }}/)
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
-
-          # echo ${PYTHON_VERSION}
-          # echo ${PLAT_NAME}
-          # echo ${DOCKER_TAG}
-          # echo ${OUTPUT_FOLDER}
-          # # remove -it
-          # sed -i 's/docker run --rm -it/docker run --rm/g' builder/manywheel/build_wheel.sh
-          # bash builder/manywheel/build_wheel.sh ${PYTHON_VERSION} ${PLAT_NAME} ${DOCKER_TAG} ${OUTPUT_FOLDER}
       - name: Upload Artifacts
         uses: actions/upload-artifact@v3
         with:
           if-no-files-found: error
           name: ${{ steps.build.outputs.filename }}
-          path: dummy_folder/${{ steps.build.outputs.filename }}
+          path: builder/manywheel/${{ env.OUTPUT_FOLDER }}/${{ steps.build.outputs.filename }}
           retention-days: 1
 
   windows-build:
@@ -63,44 +61,42 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-      # - name: Set up python
-      #   uses: actions/setup-python@v4
-      #   with:
-      #     python-version: ${{ matrix.pyver }}
-      # - name: Install python packages
-      #   run: |
-      #     pip install pybind11 wheel
-      # - uses: Jimver/cuda-toolkit@v0.2.11
-      #   id: cuda-toolkit
-      #   with:
-      #     cuda: '12.1.0'
-      #     use-github-cache: false
+      - name: Set up python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyver }}
+      - name: Install python packages
+        run: |
+          pip install pybind11 wheel
+      - uses: Jimver/cuda-toolkit@v0.2.11
+        id: cuda-toolkit
+        with:
+          cuda: '12.1.0'
+          use-github-cache: false
       - name: Build wheel
         id: build
         run: |
-          mkdir dummy_folder
-          echo "dummy" >> dummy_folder/text-${{ matrix.pyver }}.win.txt
-          $filename = Get-ChildItem dummy_folder -Name
+          mkdir build
+          cd build
+          # https://github.com/pypa/setuptools/issues/1631
+          pip install -U setuptools
+          ..\builder\windows\generate.ps1
+          cmake --build . --config Release -- /m /v:q
+          if (-Not $?) {
+            echo "build failed"
+            exit 1
+          }
+          cmake --install . --config Release
+          cd ..
+          rm build -Force -Recurse
+          python setup.py bdist_wheel -d build/wheel
+          # filename
+          $filename = Get-ChildItem build/wheel -Name
           echo "filename=$filename" >> "$env:GITHUB_OUTPUT"
-
-          # mkdir build
-          # cd build
-          # # https://github.com/pypa/setuptools/issues/1631
-          # pip install -U setuptools
-          # ..\builder\windows\generate.ps1
-          # cmake --build . --config Release -- /m /v:q
-          # if (-Not $?) {
-          #   echo "build failed"
-          #   exit 1
-          # }
-          # cmake --install . --config Release
-          # cd ..
-          # rm build -Force -Recurse
-          # python setup.py bdist_wheel -d build/wheel
       - name: Upload Artifacts
         uses: actions/upload-artifact@v3
         with:
           if-no-files-found: error
           name: ${{ steps.build.outputs.filename }}
-          path: dummy_folder/${{ steps.build.outputs.filename }}
+          path: build/wheel/${{ steps.build.outputs.filename }}
           retention-days: 1
