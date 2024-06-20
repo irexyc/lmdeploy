@@ -51,7 +51,7 @@ jobs:
         with:
           if-no-files-found: error
           name: ${{ steps.build.outputs.filename }}
-          path: dummy_folder/*
+          path: dummy_folder/${{ steps.build.outputs.filename }}
           retention-days: 1
 
   # windows-build:
