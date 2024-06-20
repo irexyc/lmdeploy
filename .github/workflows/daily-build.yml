@@ -81,7 +81,7 @@ jobs:
           mkdir dummy_folder
           echo "dummy" >> dummy_folder/text-${{ matrix.pyver }}.win.txt
           $filename = Get-ChildItem dummy_folder -Name
-          echo "$filename=$filename" >> "$env:GITHUB_OUTPUT"
+          echo "filename=$filename" >> "$env:GITHUB_OUTPUT"
 
           # mkdir build
           # cd build
