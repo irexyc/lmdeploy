@@ -36,7 +36,7 @@ jobs:
         id: build
         run: |
           mkdir dummy_folder
-          echo "dummy" >> dummy_folder/text-${{ matrix.pyver }}
+          echo "dummy" >> dummy_folder/text-${{ matrix.pyver }}.txt
           filename=$(ls dummy_folder/)
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
           # echo ${PYTHON_VERSION}
