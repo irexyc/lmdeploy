@@ -551,8 +551,11 @@ class InternVLInternLM2Chat(InternLM2Chat7B):
     def __init__(
             self,
             meta_instruction='You are an AI assistant whose name is InternLM (书生·浦语).',
+            stop_words=['[UNUSED_TOKEN_145]', '[UNUSED_TOKEN_146]'],
             **kwargs):
-        super().__init__(meta_instruction=meta_instruction, **kwargs)
+        super().__init__(meta_instruction=meta_instruction,
+                         stop_words=stop_words,
+                         **kwargs)
 
     @classmethod
     def match(cls, model_path: str) -> Optional[str]:
@@ -575,7 +578,7 @@ class InternVL2InternLM2(InternLM2Chat7B):
     def __init__(
             self,
             meta_instruction='你是由上海人工智能实验室联合商汤科技开发的书生多模态大模型，英文名叫InternVL, 是一个有用无害的人工智能助手。',
-            stop_words=['<|im_start|>', '<|im_end|>'],
+            stop_words=['[UNUSED_TOKEN_145]', '[UNUSED_TOKEN_146]'],
             **kwargs):
         super().__init__(meta_instruction=meta_instruction,
                          stop_words=stop_words,
@@ -1422,6 +1425,10 @@ class ChatmlDirect(BaseChatTemplate):
                  eoa='<|im_end|>',
                  separator='',
                  session_len=4096,
+                 stop_words=[
+                     '<|endoftext|>', '<|im_start|>', '<|im_end|>',
+                     '<|im_sep|>'
+                 ],
                  **kwargs):
         super().__init__(system,
                          meta_instruction=meta_instruction,
@@ -1431,6 +1438,7 @@ class ChatmlDirect(BaseChatTemplate):
                          assistant=assistant,
                          eoa=eoa,
                          separator=separator,
+                         stop_words=stop_words,
                          session_len=session_len,
                          **kwargs)
 
