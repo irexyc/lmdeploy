@@ -44,6 +44,9 @@ const Sequence* SequenceManager::Create(uint64_t id)
         Erase(it);
     }
     it = sequences_.emplace_hint(it, id, std::move(sequence));
+    if (rank_ == 0) {
+        TM_LOG_INFO("[SequenceManager][Create] Creating ID %ld, live size %ld", (long)id, (long)sequences_.size());
+    }
     return &it->second;
 }
 
@@ -73,6 +76,10 @@ void SequenceManager::Erase(std::map<uint64_t, Sequence>::iterator& it)
     // if prefix cache enabled, blocks will be shared by sequences, cannot be freed immediately
     if (!block_trie_->enabled()) {
         freed_.insert(freed_.end(), seq.blocks.begin(), seq.blocks.end());
+    }
+    if (rank_ == 0) {
+        TM_LOG_INFO(
+            "[SequenceManager][Erase] Removing ID %ld, live size %ld", (long)it->first, (long)sequences_.size());
     }
     it = sequences_.erase(it);
 }
