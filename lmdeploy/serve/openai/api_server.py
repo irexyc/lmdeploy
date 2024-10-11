@@ -7,6 +7,7 @@ from functools import partial
 from http import HTTPStatus
 from typing import AsyncGenerator, Dict, List, Literal, Optional, Union
 
+import torch
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -199,7 +200,9 @@ def _create_completion_logprobs(tokenizer: Tokenizer,
 
 def _create_chat_completion_logprobs(tokenizer: Tokenizer,
                                      token_ids: List[int] = None,
-                                     logprobs: List[Dict[int, float]] = None):
+                                     logprobs: List[Dict[int, float]] = None,
+                                     first_token: List[bool] = None,
+                                     logits=None):
     """create openai LogProbs for chat.completion.
 
     Args:
@@ -230,6 +233,9 @@ def _create_chat_completion_logprobs(tokenizer: Tokenizer,
                 item.token = token
                 item.bytes = _bytes
                 item.logprob = prob
+                if first_token and first_token[0]:
+                    first_token[0] = False
+                    item.logprob = torch.log(logits[token_id]).item()
             else:
                 item.top_logprobs.append(
                     TopLogprob(token=token, bytes=_bytes, logprob=prob))
@@ -402,6 +408,37 @@ async def chat_completions_v1(request: ChatCompletionRequest,
             ]
         else:
             tools = [item.function.model_dump() for item in request.tools]
+
+    logits = None
+    first_token = None
+    if request.replace_first_token_prob:
+        if hasattr(VariableInterface.async_engine, '_convert_prompts'):
+            request.messages = VariableInterface.async_engine._convert_prompts(
+                request.messages)
+        inputs = await VariableInterface.async_engine._get_prompt_input(
+            request.messages,
+            do_preprocess=True,
+            sequence_start=True,
+            adapter_name=None)
+        input_ids = inputs['input_ids']
+        embeddings = inputs['input_embeddings']
+        embedding_ranges = inputs['input_embedding_ranges']
+
+        def get_first_token_logits():
+            logits = VariableInterface.async_engine.get_logits(
+                input_ids,
+                embeddings,
+                embedding_ranges,
+                session_ids=request.session_id)
+            logits = logits[0, -1]
+            logits = torch.softmax(logits, dim=-1)
+            return logits
+
+        # first generated token probs
+        logits = await asyncio.get_event_loop().run_in_executor(
+            None, get_first_token_logits)
+        first_token = [True]
+
     result_generator = VariableInterface.async_engine.generate(
         request.messages,
         request.session_id,
@@ -442,7 +479,7 @@ async def chat_completions_v1(request: ChatCompletionRequest,
             if gen_logprobs and res.logprobs:
                 logprobs = _create_chat_completion_logprobs(
                     VariableInterface.async_engine.tokenizer, res.token_ids,
-                    res.logprobs)
+                    res.logprobs, first_token, logits)
             if request.stream_options and request.stream_options.include_usage:
                 total_tokens = sum([
                     res.history_token_len, res.input_token_len,
@@ -509,7 +546,7 @@ async def chat_completions_v1(request: ChatCompletionRequest,
     if gen_logprobs and len(final_logprobs):
         logprobs = _create_chat_completion_logprobs(
             VariableInterface.async_engine.tokenizer, final_token_ids,
-            final_logprobs)
+            final_logprobs, first_token, logits)
 
     assert final_res is not None
     choices = []

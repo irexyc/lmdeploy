@@ -854,7 +854,8 @@ class TurboMindInstance:
                input_embeddings=None,
                input_embedding_ranges=None,
                sequence_start: bool = True,
-               sequence_end: bool = True):
+               sequence_end: bool = True,
+               session_ids: List[int] = None):
         """Perform context decode on input tokens.
 
         Args:
@@ -874,6 +875,8 @@ class TurboMindInstance:
             input_ids = [input_ids]
         if steps is None:
             steps = [0] * len(input_ids)
+        if session_ids is None:
+            session_ids = list(range(len(input_ids)))
         assert isinstance(steps, List) and len(steps) == len(input_ids)
 
         # append an extra token since input_len-1 tokens will be
@@ -902,6 +905,7 @@ class TurboMindInstance:
                       input_lengths=input_lengths,
                       request_output_len=_broadcast_np(0, dtype=np.uint32),
                       is_return_logits=_broadcast_np(1, np.uint32),
+                      CORRID=np.array(session_ids, dtype=np.uint64),
                       START=_broadcast_np((1 if sequence_start else 0),
                                           np.int32),
                       END=_broadcast_np((1 if sequence_end else 0), np.int32),

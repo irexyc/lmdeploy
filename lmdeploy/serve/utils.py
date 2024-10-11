@@ -64,11 +64,12 @@ class LogitsMixin:
         return outputs
 
     def get_logits(
-        self,
-        input_ids: Union[InputIdsType, List[InputIdsType]],
-        input_embeddings: Union[InputEmbsType, List[InputEmbsType]] = None,
-        input_embedding_ranges: Union[InputEmbRngsType,
-                                      List[InputEmbRngsType]] = None):
+            self,
+            input_ids: Union[InputIdsType, List[InputIdsType]],
+            input_embeddings: Union[InputEmbsType, List[InputEmbsType]] = None,
+            input_embedding_ranges: Union[InputEmbRngsType,
+                                          List[InputEmbRngsType]] = None,
+            session_ids: List[int] = None):
         """Get logits given a list of input tokens.
 
         Args:
@@ -78,6 +79,8 @@ class LogitsMixin:
         assert len(input_ids) > 0
         if isinstance(input_ids[0], int):
             input_ids = [input_ids]
+        if isinstance(session_ids, int):
+            session_ids = [session_ids]
         for input_id in input_ids:
             assert len(input_id) > 0
 
@@ -169,6 +172,7 @@ class LogitsMixin:
                                        steps=steps,
                                        input_embeddings=embeddings,
                                        input_embedding_ranges=ranges,
+                                       session_ids=session_ids,
                                        sequence_start=(i == 0),
                                        sequence_end=(i == n_max_iter - 1))
             _logits = _logits.cpu()
