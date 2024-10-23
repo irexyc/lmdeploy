@@ -180,6 +180,13 @@ TensorMap LlamaWeight<T>::getParams()
         }
     }
 
+    // cross layer
+    if (num_cross_layer_) {
+        output.insert("cross_decoder.norm.weight",
+                      Tensor{MEMORY_GPU, getTensorType<T>(), {hidden_units_ * sizeof(T)}, cross_norm});
+        getWeightTensor(cross_kv, attn_bias_, "cross_decoder.w_kv." + std::to_string(tensor_para_rank_), output);
+    }
+
     return output;
 }
 

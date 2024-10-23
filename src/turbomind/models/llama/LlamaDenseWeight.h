@@ -195,4 +195,68 @@ inline void loadWeights(
     }
 }
 
+template<typename FirstArg, typename... Args>
+inline std::string concat(FirstArg&& first, Args&&... args)
+{
+    std::stringstream stream;
+    stream << first;
+    ((stream << "." << args), ...);
+    return stream.str();
+}
+
+template<typename T>
+inline void getWeightTensor(LlamaDenseWeight<T>& weights, bool bias, const std::string& prefix, TensorMap& output)
+{
+    auto get_name = [=](const std::string& name) { return concat(prefix, name); };
+
+    if (bias) {
+        output.insert(get_name("bias"),
+                      Tensor{MEMORY_GPU, getTensorType<T>(), {weights.output_dims * sizeof(T)}, weights.bias});
+    }
+    const size_t bit_size = getBitSize(weights.type);
+    if (bit_size >= 16) {
+        output.insert(get_name("weight"),
+                      Tensor{MEMORY_GPU,
+                             getTensorType<T>(),
+                             {weights.input_dims * weights.output_dims * sizeof(T)},
+                             weights.kernel});
+    }
+    else {  // int8, int4
+        const int factor = sizeof(float) * 8 / bit_size;
+        output.insert(get_name("qweight"),
+                      Tensor{MEMORY_GPU,
+                             TYPE_INT32,
+                             {weights.input_dims * weights.output_dims * sizeof(int) / factor},
+                             weights.kernel});
+        output.insert(get_name("scales"),
+                      Tensor{MEMORY_GPU,
+                             getTensorType<T>(),
+                             {weights.input_dims / weights.group_size * weights.output_dims * sizeof(T)},
+                             weights.scales});
+        output.insert(get_name("zeros"),
+                      Tensor{MEMORY_GPU,
+                             getTensorType<T>(),
+                             {weights.input_dims / weights.group_size * weights.output_dims * sizeof(T)},
+                             weights.zeros});
+    }
+
+    if (weights.lora.r) {
+        // FT_CHECK(bit_size >= 16);
+        auto        n       = prefix.rfind(".");
+        std::string _prefix = prefix.substr(0, n);
+        std::string _num    = prefix.substr(n + 1);
+        output.insert(
+            concat(_prefix, "lora_a", _num, "weight"),
+            Tensor{MEMORY_GPU, getTensorType<T>(), {weights.input_dims * weights.lora.r * sizeof(T)}, weights.lora.a});
+        output.insert(
+            concat(_prefix, "lora_b", _num, "weight"),
+            Tensor{MEMORY_GPU, getTensorType<T>(), {weights.lora.r * weights.output_dims * sizeof(T)}, weights.lora.b});
+        TM_LOG_DEBUG("allocate lora weight, layer_name=%s input_dims=%d, output_dims=%d, lora_r=%d",
+                     get_name("weight").c_str(),
+                     weights.input_dims,
+                     weights.output_dims,
+                     weights.lora.r);
+    }
+}
+
 }  // namespace turbomind
