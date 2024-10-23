@@ -80,6 +80,20 @@ void DropEmbeddings(const Sequence& seq)
     seq.input_embedding_ranges.resize(sz);
 }
 
+bool HasReturnLogitsRequest(BatchState* state, const std::vector<int>& indices)
+{
+    bool is_return_logits = false;
+    for (int k = 0; k < indices.size(); ++k) {
+        auto& request = state->requests[indices[k]];
+        auto  logits  = request->outputs.getPtr<float>("logits", nullptr);
+        if (logits != nullptr) {
+            is_return_logits = true;
+            break;
+        }
+    }
+    return is_return_logits;
+}
+
 template<typename T>
 void LlamaBatch<T>::RejectInvalidRequests(Requests& stop_reqs, Requests& infer_reqs)
 {
@@ -1009,7 +1023,13 @@ LlamaBatch<T>::LlamaBatch(const EngineParam&           param,
         return GetSyncFreeMemSize(*shared_state_->barrier, shared_state_->free_size);
     };
 
-    sequence_manager_.reset(new SequenceManager{model_->layer_num_,
+    auto GetKVLayerNum = [&]() {
+        size_t layer_num         = model_->param_.layer_num;
+        size_t cross_layer_num   = model_->param_.cross_layer_num;
+        size_t kvcache_layer_num = cross_layer_num ? (layer_num - cross_layer_num + 1) : layer_num;
+        return kvcache_layer_num;
+    };
+    sequence_manager_.reset(new SequenceManager{GetKVLayerNum(),
                                                 block_config,
                                                 param.cache_max_block_count,
                                                 param.cache_chunk_size,
@@ -1702,6 +1722,10 @@ bool LlamaBatch<T>::Forward(GenerationState& g)
             }
         }
 
+        if (model_->param_.cross_layer_num) {
+            h_has_return_logits_req_ = HasReturnLogitsRequest(state_, decode_indices);
+        }
+
         model_->forwardUnified(decoder_output_buf_ + first * model_->hidden_units_,
                                context_decoder_output_buf_,  // temp
                                context_decoder_input_buf_,   // temp
@@ -1716,6 +1740,8 @@ bool LlamaBatch<T>::Forward(GenerationState& g)
                                dc_batch_size,
                                pf_batch_size,
                                lora_mask_buf_,
+                               h_has_return_logits_req_,
+                               g.partial,
                                sequences.data());
 
         // compute logits of inputs if requested

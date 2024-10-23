@@ -32,6 +32,7 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
                             size_t     inter_size,
                             size_t     vocab_size,
                             size_t     num_layer,
+                            size_t     num_cross_layer,
                             bool       attn_bias,
                             WeightType weight_type,
                             int        group_size,
@@ -43,6 +44,8 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
     vocab_size_(vocab_size),
     vocab_size_padded_(vocab_size),
     num_layer_(num_layer),
+    num_cross_layer_(num_cross_layer),
+    attn_bias_(attn_bias),
     weight_type_(weight_type),
     tensor_para_size_(tensor_para_size),
     tensor_para_rank_(tensor_para_rank)
@@ -57,6 +60,7 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
     decoder_layer_weights.reserve(num_layer_);
     for (unsigned l = 0; l < num_layer_; ++l) {
         decoder_layer_weights.push_back(new LlamaDecoderLayerWeight<T>(l,
+                                                                       num_cross_layer,
                                                                        head_num,
                                                                        kv_head_num,
                                                                        size_per_head,
@@ -68,6 +72,13 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
                                                                        attn_bias,
                                                                        tensor_para_size_,
                                                                        tensor_para_rank_));
+    }
+
+    if (num_cross_layer_) {
+        cross_kv.input_dims  = hidden_units_;
+        cross_kv.output_dims = (2 * kv_head_num) * size_per_head / tensor_para_size_;
+        cross_kv.type        = weight_type_;
+        cross_kv.group_size  = group_size;
     }
 
     mallocWeights();
@@ -87,6 +98,12 @@ LlamaWeight<T>::~LlamaWeight()
     for (auto& p : decoder_layer_weights) {
         delete p;
     }
+
+    if (num_cross_layer_) {
+        turbomind::freeWeights(cross_kv);
+        cudaFree((void*)cross_norm);
+        cross_norm = nullptr;
+    }
 }
 
 template<typename T>
@@ -96,6 +113,11 @@ void LlamaWeight<T>::mallocWeights()
     deviceMalloc((T**)&pre_decoder_embedding_table, vocab_size_padded_ * hidden_units_ / tensor_para_size_);
     deviceMalloc((T**)&output_norm_weight, hidden_units_);
     deviceMalloc((T**)&post_decoder_embedding_kernel, hidden_units_ * vocab_size_padded_ / tensor_para_size_);
+
+    if (num_cross_layer_) {
+        turbomind::mallocWeights(cross_kv, attn_bias_);
+        deviceMalloc((T**)&cross_norm, hidden_units_);
+    }
 }
 
 template<typename T>
@@ -121,6 +143,11 @@ void LlamaWeight<T>::loadModel(std::string dir_path)
 
     for (unsigned layer = 0; layer < num_layer_; ++layer) {
         decoder_layer_weights[layer]->loadModel(dir_path + "layers." + std::to_string(layer), model_file_type);
+    }
+
+    if (num_cross_layer_) {
+        loadWeights(cross_kv, dir_path + "cross_decoder.w_kv", tensor_para_rank_, model_file_type, tensor_para_size_);
+        loadWeightFromBin((T*)cross_norm, {hidden_units_}, dir_path + "cross_decoder.norm.weight", model_file_type);
     }
 }
 

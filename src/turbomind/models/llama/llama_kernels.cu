@@ -560,4 +560,43 @@ void invokeBatchedCopy(void** src_ptr, void** dst_ptr, int* size, int count, cud
         });
 }
 
+template<typename T>
+__global__ void keepPrefillLastToken(T* out1, T* out2, T* out3, const int* cu_seqlens, size_t offset, int w12, int w3)
+{
+    int bi = blockIdx.x;
+    int ti = cu_seqlens[bi + 1 + offset] - 1;
+    offset += bi;
+
+    T*  outs[] = {out1, out2, out3};
+    int dims[] = {w12, w12, w3};
+    for (int k = 0; k < 3; k++) {
+        T*  out = outs[k];
+        int dim = dims[k];
+        for (int i = threadIdx.x; i < dim; i += blockDim.x) {
+            out[dim * offset + i] = out[dim * ti + i];
+        }
+    }
+}
+
+template<typename T>
+void invokeKeepPrefillLastToken(T*           out1,
+                                T*           out2,
+                                T*           out3,
+                                const int*   cu_seqlens,
+                                int          w12,
+                                int          w3,
+                                int          dc_batch_size,
+                                int          pf_batch_size,
+                                cudaStream_t stream)
+{
+    keepPrefillLastToken<<<pf_batch_size, 256, 0, stream>>>(out1, out2, out3, cu_seqlens, dc_batch_size, w12, w3);
+}
+
+template void invokeKeepPrefillLastToken(float*, float*, float*, const int*, int, int, int, int, cudaStream_t);
+template void invokeKeepPrefillLastToken(half*, half*, half*, const int*, int, int, int, int, cudaStream_t);
+#ifdef ENABLE_BF16
+template void invokeKeepPrefillLastToken(
+    __nv_bfloat16*, __nv_bfloat16*, __nv_bfloat16*, const int*, int, int, int, int, cudaStream_t);
+#endif  // ENABLE_BF16
+
 }  // namespace turbomind

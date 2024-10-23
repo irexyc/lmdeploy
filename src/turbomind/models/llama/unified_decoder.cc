@@ -16,6 +16,10 @@ UnifiedDecoder<T>::UnifiedDecoder(const ModelParam&     model,
                                   const LoraParam&      lora,
                                   const NcclParam&      tp,
                                   const Context<T>&     ctx):
+    model_param_(model),
+    size_per_head_(model.head_dim),
+    local_kv_head_num_(model.kv_head_num / tp.world_size_),
+    linear_(ctx.linear.get()),
     layer_num_(model.layer_num),
     hidden_units_(model.hidden_units),
     rmsnorm_eps_(model.norm_eps),
@@ -47,22 +51,34 @@ void UnifiedDecoder<T>::allocateBuffer(size_t batch_size)
 }
 
 template<typename T>
+void UnifiedDecoder<T>::allocateCrossBuffer(size_t token_num)
+{
+    TM_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    cross_norm_ = (T*)allocator_->reMalloc(cross_norm_, sizeof(T) * token_num * hidden_units_, false);
+    cross_kv_ =
+        (T*)allocator_->reMalloc(cross_kv_, sizeof(T) * token_num * 2 * local_kv_head_num_ * size_per_head_, false);
+}
+
+template<typename T>
 void UnifiedDecoder<T>::freeBuffer()
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     allocator_->free((void**)&cu_q_len_);
     allocator_->free((void**)&h_cu_q_len_, true);
+    allocator_->free((void**)&cross_norm_);
+    allocator_->free((void**)&cross_kv_);
 }
 
 template<typename T>
-void UnifiedDecoder<T>::forwardSelfAttn(T*                             attn_io,
-                                        TensorMap*                     _outputs,
-                                        const TensorMap*               _inputs,
-                                        size_t                         token_num,
-                                        size_t                         batch_size,
-                                        int                            layer_id,
-                                        const LlamaAttentionWeight<T>* weight)
+void UnifiedDecoder<T>::forwardSelfAttn(T*                    attn_io,
+                                        TensorMap*            _outputs,
+                                        const TensorMap*      _inputs,
+                                        size_t                token_num,
+                                        size_t                batch_size,
+                                        int                   layer_id,
+                                        const LlamaWeight<T>* model_weights)
 {
     TensorMap inputs(*_inputs);
     inputs.insert("input_query", {MEMORY_GPU, dtype_, {token_num, hidden_units_}, attn_io});
@@ -71,15 +87,71 @@ void UnifiedDecoder<T>::forwardSelfAttn(T*                             attn_io,
     inputs.insert("cu_k_len", {MEMORY_GPU, TYPE_INT32, {batch_size + 1}, cu_k_len_});
     inputs.insert("h_cu_q_len", {MEMORY_CPU, TYPE_INT32, {batch_size + 1}, h_cu_q_len_});
     inputs.insert("h_cu_k_len", {MEMORY_CPU, TYPE_INT32, {batch_size + 1}, h_cu_k_len_});
+    if (attn_layer_->isCrossLayer(layer_id)) {
+        inputs.insert("cross_kv",
+                      {MEMORY_GPU, dtype_, {token_num, 2 * local_kv_head_num_ * size_per_head_}, cross_kv_});
+    }
 
     TensorMap outputs(*_outputs);
     outputs.insert("hidden_features", {MEMORY_GPU, dtype_, {token_num, hidden_units_}, attn_io});
 
-    attn_layer_->forward(&outputs, &inputs, weight);
+    attn_layer_->forward(&outputs, &inputs, model_weights);
 }
 
 template<typename T>
-void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, const std::vector<WeightType*>* weights)
+void UnifiedDecoder<T>::getCrossKV(T* hidden_states, size_t token_num, const LlamaWeight<T>* weights)
+{
+    // cross norm
+    invokeRootMeanSquareNorm(
+        cross_norm_, hidden_states, weights->cross_norm, rmsnorm_eps_, token_num, hidden_units_, stream_);
+    sync_check_cuda_error();
+
+    // cross kv
+    int* lora_mask = nullptr;
+    linear_->forward(cross_kv_, cross_norm_, token_num, weights->cross_kv, LlamaLinear<T>::kGemm, lora_mask);
+    sync_check_cuda_error();
+}
+
+template<typename T>
+void UnifiedDecoder<T>::removeTokens(
+    T* attn_io, T* residual, size_t pf_batch_size, size_t dc_batch_size, TensorMap* _inputs, size_t& token_num)
+{
+    if (pf_batch_size == 0) {
+        return;
+    }
+
+    // remove tokens
+    invokeKeepPrefillLastToken(attn_io,
+                               residual,
+                               cross_kv_,
+                               cu_q_len_,
+                               hidden_units_,
+                               2 * local_kv_head_num_ * size_per_head_,
+                               dc_batch_size,
+                               pf_batch_size,
+                               stream_);
+    sync_check_cuda_error();
+
+    // update cumulative lengths (cu_q_len_)
+    check_cuda_error(cudaEventSynchronize(ev_h_cu_x_));
+    int batch_size = pf_batch_size + dc_batch_size;
+    for (int i = dc_batch_size + 1; i <= batch_size; ++i) {
+        h_cu_q_len_[i] = h_cu_q_len_[i - 1] + 1;
+    }
+    check_cuda_error(
+        cudaMemcpyAsync(cu_q_len_, h_cu_q_len_, sizeof(int) * (batch_size + 1), cudaMemcpyDefault, stream_));
+    check_cuda_error(cudaEventRecord(ev_h_cu_x_, stream_));
+    token_num = batch_size;
+
+    // update pf_batch_size & dc_batch_size
+    int* pf_batch_size_ptr = _inputs->getPtr<int>("pf_batch_size");
+    int* dc_batch_size_ptr = _inputs->getPtr<int>("dc_batch_size");
+    *pf_batch_size_ptr     = 0;
+    *dc_batch_size_ptr     = batch_size;
+}
+
+template<typename T>
+void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, const LlamaWeight<T>* model_weights)
 {
     /**
      * input tensors:
@@ -99,7 +171,9 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
      *   \param block_ptrs [total_block_counts], void*
      */
 
-    const size_t token_num = inputs->at("decoder_input").shape[0];
+    const std::vector<WeightType*>* weights = &model_weights->decoder_layer_weights;
+
+    size_t token_num = inputs->at("decoder_input").shape[0];
 
     const int pf_batch_size = inputs->getVal<int>("pf_batch_size");
     const int dc_batch_size = inputs->getVal<int>("dc_batch_size");
@@ -111,6 +185,13 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
     T* decoder_input_output    = inputs->getPtr<T>("decoder_input");
     T* decoder_output          = outputs->getPtr<T>("decoder_output");
     T* last_token_hidden_units = outputs->getPtr<T>("last_token_hidden_units");
+
+    TensorMap _inputs(*inputs);
+    if (model_param_.cross_layer_num) {
+        allocateCrossBuffer(token_num);
+    }
+    bool has_return_logits_req = inputs->getVal<bool>("has_return_logits_req");
+    int  partial               = inputs->getVal<int>("partial");
 
     {  // compute cumulative lengths
 
@@ -153,17 +234,30 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
 
         // Compare(decoder_output, token_num * hidden_units_, "attn_input", kCmpRead, stream_);
 
+        if (attn_layer_->isFirstCrossLayer(layer)) {
+            getCrossKV(decoder_input_output, token_num, model_weights);
+        }
+
         /////////////////////////////////////////////
         /// self-attention
         forwardSelfAttn(decoder_output,  //
                         outputs,
-                        inputs,
+                        &_inputs,
                         token_num,
                         batch_size,
                         layer,
-                        &weights->at(layer)->self_attn_weights);
+                        model_weights);
 
         count_and_fix(decoder_output, token_num * hidden_units_, Concat("attn_block", layer), 2);
+
+        if (attn_layer_->isFirstCrossLayer(layer) && !has_return_logits_req) {
+            if (dc_batch_size == 0 && pf_batch_size == 1 && partial) {
+                // only contains prefill token and partial input (single long request)
+                break;
+            }
+            // keep the last prefill token for each request, update pf_batch_size & dc_batch_size
+            removeTokens(decoder_output, decoder_input_output, pf_batch_size, dc_batch_size, &_inputs, token_num);
+        }
 
         invokeFusedAddBiasResidualRMSNorm(decoder_input_output,
                                           decoder_output,

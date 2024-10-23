@@ -16,6 +16,7 @@ struct ModelParam {
     size_t kv_head_num;
     size_t hidden_units;
     size_t layer_num;
+    size_t cross_layer_num;  // for internlm3 yoco
     size_t inter_size;
     size_t vocab_size;
     float  norm_eps;

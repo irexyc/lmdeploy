@@ -143,7 +143,26 @@ void UnifiedAttentionLayer<T>::freeBuffer()
 }
 
 template<typename T>
-inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMap* inputs, const WeightType* weights)
+bool UnifiedAttentionLayer<T>::isCrossLayer(int layer_id)
+{
+    if (!model_param_.cross_layer_num) {
+        return false;
+    }
+    return layer_id >= model_param_.cross_layer_num;
+}
+
+template<typename T>
+bool UnifiedAttentionLayer<T>::isFirstCrossLayer(int layer_id)
+{
+    if (!model_param_.cross_layer_num) {
+        return false;
+    }
+    return layer_id == model_param_.cross_layer_num;
+}
+
+template<typename T>
+inline void
+UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMap* inputs, const LlamaWeight<T>* model_weights)
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
@@ -172,6 +191,8 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
     /// parse inputs
     const int token_num = inputs->at("input_query").shape[0];
     const int layer_id  = inputs->getVal<int>("layer_id");
+
+    const WeightType* weights = &model_weights->decoder_layer_weights.at(layer_id)->self_attn_weights;
 
     const int dc_batch_size = inputs->getVal<int>("dc_batch_size");
     const int pf_batch_size = inputs->getVal<int>("pf_batch_size");
@@ -215,6 +236,29 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
     // [token_num, hidden_dim] -> [token_num, 3, local_hidden_dim]
     linear_->forward(qkv_buf_, attention_input, token_num, weights->qkv, LlamaLinear<T>::kGemm, lora_mask);
     sync_check_cuda_error();
+
+    if (isCrossLayer(layer_id)) {
+        // copy cross_kv to qkv_buf_
+        T* cross_kv = inputs->getPtr<T>("cross_kv");
+        check_cuda_error(cudaMemcpyAsync(
+            qkv_buf_3_, qkv_buf_, sizeof(T) * token_num * weights->qkv.output_dims, cudaMemcpyDefault, stream_));
+        check_cuda_error(cudaMemcpy2DAsync(qkv_buf_,
+                                           sizeof(T) * (weights->qkv.output_dims + model_weights->cross_kv.output_dims),
+                                           qkv_buf_3_,
+                                           sizeof(T) * weights->qkv.output_dims,
+                                           sizeof(T) * weights->qkv.output_dims,
+                                           token_num,
+                                           cudaMemcpyDefault,
+                                           stream_));
+        check_cuda_error(cudaMemcpy2DAsync(qkv_buf_ + weights->qkv.output_dims,
+                                           sizeof(T) * (weights->qkv.output_dims + model_weights->cross_kv.output_dims),
+                                           cross_kv,
+                                           sizeof(T) * model_weights->cross_kv.output_dims,
+                                           sizeof(T) * model_weights->cross_kv.output_dims,
+                                           token_num,
+                                           cudaMemcpyDefault,
+                                           stream_));
+    }
 
     count_and_fix(qkv_buf_, token_num * weights->qkv.output_dims, Concat("qkv", layer_id), 3);
 
@@ -263,6 +307,11 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
             params.q_bias = weights->qkv.bias;
             params.k_bias = params.q_bias + local_head_num_ * size_per_head_;
             params.v_bias = params.k_bias + local_kv_head_num_ * size_per_head_;
+
+            if (isCrossLayer(layer_id)) {
+                params.k_bias = model_weights->cross_kv.bias;
+                params.v_bias = params.k_bias + local_kv_head_num_ * size_per_head_;
+            }
         }
 
         params.token_num  = h_cu_q_len[offset + batch_size] - h_cu_q_len[offset];
@@ -270,10 +319,15 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
         params.max_q_len  = *std::max_element(h_q_len + offset, h_q_len + offset + batch_size);
         params.max_k_len  = *std::max_element(h_k_len + offset, h_k_len + offset + batch_size);
 
+        int cache_layer_id = layer_id;
+        if (isCrossLayer(layer_id)) {
+            cache_layer_id = model_param_.cross_layer_num;
+        }
+
         // Decoding use only
         params.block_iter_params = BlockIteratorParams{(char**)block_ptrs,  //
                                                        (int*)cu_block_count + offset,
-                                                       layer_id,
+                                                       cache_layer_id,
                                                        (int)param_.cache_block_seq_len};
 
         // Prefilling use only

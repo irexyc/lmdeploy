@@ -23,6 +23,7 @@
 
 #include "src/turbomind/models/llama/LlamaDenseWeight.h"
 #include "src/turbomind/models/llama/LlamaLinear.h"
+#include "src/turbomind/models/llama/LlamaWeight.h"
 #include "src/turbomind/models/llama/context.h"
 #include "src/turbomind/models/llama/llama_params.h"
 #include "src/turbomind/utils/Tensor.h"
@@ -69,7 +70,7 @@ public:
                           const NcclParam&      tp,
                           const Context<T>&     context);
 
-    void forward(TensorMap* outputs, const TensorMap* inputs, const LlamaAttentionWeight<T>* weights);
+    void forward(TensorMap* outputs, const TensorMap* inputs, const LlamaWeight<T>* model_weights);
 
     void prefill(T*                output,
                  T*                tmp_kv_buffer,
@@ -105,6 +106,10 @@ public:
                 int               dc_max_seq_len,
                 int               max_split_k,
                 const WeightType* weights);
+
+    bool isCrossLayer(int layer_id);
+
+    bool isFirstCrossLayer(int layer_id);
 
 private:
     const size_t head_num_;

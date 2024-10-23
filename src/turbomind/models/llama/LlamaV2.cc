@@ -208,6 +208,8 @@ void LlamaV2<T>::forwardUnified(T*               out,
                                 int              dc_batch_size,
                                 int              pf_batch_size,
                                 int*             lora_mask,
+                                bool             h_has_return_logits_req,
+                                int              partial,
                                 const Sequence** sequences)
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -284,6 +286,8 @@ void LlamaV2<T>::forwardUnified(T*               out,
                      {"finished", {MEMORY_GPU, TYPE_BOOL, {bsz}, finished}},
                      {"dc_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &dc_batch_size}},
                      {"pf_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &pf_batch_size}},
+                     {"has_return_logits_req", {MEMORY_CPU, TYPE_BOOL, {1}, &h_has_return_logits_req}},
+                     {"partial", {MEMORY_CPU, TYPE_INT32, {1}, &partial}},
                      {"rope_theta", {MEMORY_GPU, TYPE_FP32, {hidden_units_}, rope_theta}},
                      {"cu_block_counts", {MEMORY_GPU, TYPE_INT32, {bsz}, cu_block_cnts}}};
 
@@ -295,7 +299,7 @@ void LlamaV2<T>::forwardUnified(T*               out,
         inputs.insert({"lora_mask", {MEMORY_GPU, TYPE_INT32, {token_num}, lora_mask}});
     }
 
-    unified_decoder_->forward(&outputs, &inputs, &weights_->decoder_layer_weights);
+    unified_decoder_->forward(&outputs, &inputs, weights_.get());
 }
 
 template<typename T>

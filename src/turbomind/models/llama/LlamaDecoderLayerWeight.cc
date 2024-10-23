@@ -28,7 +28,6 @@
 #include "src/turbomind/utils/memory_utils.h"
 #include <cstdlib>
 #include <cuda_runtime.h>
-#include <filesystem>
 #include <ios>
 
 namespace turbomind {
@@ -54,6 +53,7 @@ static bool is_fuse_silu_act()
 
 template<typename T>
 LlamaDecoderLayerWeight<T>::LlamaDecoderLayerWeight(int        layer_idx,
+                                                    size_t     num_cross_layer,
                                                     size_t     head_num,
                                                     size_t     kv_head_num,
                                                     size_t     size_per_head,
@@ -118,6 +118,10 @@ LlamaDecoderLayerWeight<T>::LlamaDecoderLayerWeight(int        layer_idx,
     self_attn_weights.qkv.output_dims = (head_num + 2 * kv_head_num) * size_per_head / tensor_para_size_;
     self_attn_weights.qkv.type        = weight_type;
     self_attn_weights.qkv.group_size  = group_size;
+    if (num_cross_layer && layer_idx >= num_cross_layer) {
+        // cross attn layer for internlm3, only has wq
+        self_attn_weights.qkv.output_dims = head_num * size_per_head / tensor_para_size_;
+    }
 
     self_attn_weights.output.input_dims  = (head_num * size_per_head) / tensor_para_size_;
     self_attn_weights.output.output_dims = hidden_units_;
@@ -167,53 +171,6 @@ size_t LlamaDecoderLayerWeight<T>::workspace_size() const noexcept
     }
 
     return size * sizeof(uint16_t);
-}
-
-template<typename T>
-void freeWeights(LlamaDenseWeight<T>& weights)
-{
-    cudaFree(weights.kernel);
-    cudaFree(weights.bias);
-    cudaFree(weights.scales);
-    cudaFree(weights.zeros);
-
-    weights.kernel = nullptr;
-    weights.bias   = nullptr;
-    weights.scales = nullptr;
-    weights.zeros  = nullptr;
-
-    {
-        cudaFree(weights.lora.a);
-        cudaFree(weights.lora.b);
-        weights.lora.a = nullptr;
-        weights.lora.b = nullptr;
-    }
-}
-
-template<typename T>
-void mallocWeights(LlamaDenseWeight<T>& weights, bool bias)
-{
-    if (bias) {
-        deviceMalloc((T**)&weights.bias, weights.output_dims);
-    }
-    const size_t bit_size = getBitSize(weights.type);
-    if (bit_size >= 16) {  // fp16, fp32
-        deviceMalloc((T**)&weights.kernel, weights.input_dims * weights.output_dims);
-    }
-    else {  // int8, int4
-        const int factor = sizeof(float) * 8 / bit_size;
-        FT_CHECK(weights.input_dims % factor == 0);
-        deviceMalloc((int**)&weights.kernel, weights.input_dims * weights.output_dims / factor);
-        deviceMemSetZero((int*)weights.kernel, weights.input_dims * weights.output_dims / factor);
-        deviceMalloc((T**)&weights.scales, weights.input_dims / weights.group_size * weights.output_dims);
-        deviceMalloc((T**)&weights.zeros, weights.input_dims / weights.group_size * weights.output_dims);
-    }
-
-    if (weights.lora.r > 0) {
-        // FT_CHECK(bit_size >= 16);
-        deviceMalloc((T**)&weights.lora.a, weights.input_dims * weights.lora.r);
-        deviceMalloc((T**)&weights.lora.b, weights.lora.r * weights.output_dims);
-    }
 }
 
 template<typename FirstArg, typename... Args>
@@ -277,45 +234,6 @@ void getWeightTensor(LlamaDenseWeight<T>& weights, bool bias, const std::string&
                      weights.input_dims,
                      weights.output_dims,
                      weights.lora.r);
-    }
-}
-
-template<typename T>
-void loadWeights(
-    LlamaDenseWeight<T>& w, std::string prefix, int rank, FtCudaDataType model_file_type, size_t tensor_para_size)
-{
-    auto weight_file  = prefix + "." + std::to_string(tensor_para_size - 1) + ".weight";
-    auto qweight_file = prefix + "." + std::to_string(tensor_para_size - 1) + ".qweight";
-    if (!std::filesystem::exists(weight_file) && !std::filesystem::exists(qweight_file)) {
-        TM_LOG_ERROR("%s and %s does not exist", weight_file.c_str(), qweight_file.c_str());
-        FT_CHECK(false);
-    }
-
-    prefix += "." + std::to_string(rank);
-
-    size_t     dim0 = w.input_dims;
-    size_t     dim1 = w.output_dims;
-    const auto type = model_file_type;
-
-    if (w.bias) {
-        loadWeightFromBin((T*)w.bias, {1, dim1}, prefix + ".bias", type);
-    }
-    const size_t bit_size = getBitSize(w.type);
-    if (bit_size >= 16) {  // fp16, fp32
-        loadWeightFromBin((T*)w.kernel, {dim0, dim1}, prefix + ".weight", type);
-    }
-    else {  // int8, int4
-        const int factor = sizeof(float) * 8 / bit_size;
-
-        FT_CHECK(dim1 % factor == 0);
-
-        std::vector<size_t> w_shape{dim0, dim1 / factor * sizeof(uint32_t)};
-        loadWeightFromBin((int8_t*)w.kernel, w_shape, prefix + ".qweight", FtCudaDataType::INT8);
-
-        const size_t group_count = w.group_size > 0 ? dim0 / w.group_size : 1;
-
-        loadWeightFromBin((half*)w.scales, {group_count, dim1}, prefix + ".scales", type);
-        loadWeightFromBin((half*)w.zeros, {group_count, dim1}, prefix + ".zeros", type);
     }
 }
 

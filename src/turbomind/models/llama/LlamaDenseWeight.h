@@ -21,6 +21,8 @@
 
 #include "src/turbomind/kernels/gemm/types.h"
 #include "src/turbomind/utils/cuda_utils.h"
+#include "src/turbomind/utils/memory_utils.h"
+#include <filesystem>
 
 namespace turbomind {
 
@@ -106,5 +108,91 @@ struct LlamaFfnWeight {
     LlamaDenseWeight<T> fused_gating_intermediate;
     bool                is_fused_silu;
 };
+
+template<typename T>
+inline void freeWeights(LlamaDenseWeight<T>& weights)
+{
+    cudaFree(weights.kernel);
+    cudaFree(weights.bias);
+    cudaFree(weights.scales);
+    cudaFree(weights.zeros);
+
+    weights.kernel = nullptr;
+    weights.bias   = nullptr;
+    weights.scales = nullptr;
+    weights.zeros  = nullptr;
+
+    {
+        cudaFree(weights.lora.a);
+        cudaFree(weights.lora.b);
+        weights.lora.a = nullptr;
+        weights.lora.b = nullptr;
+    }
+}
+
+template<typename T>
+inline void mallocWeights(LlamaDenseWeight<T>& weights, bool bias)
+{
+    if (bias) {
+        deviceMalloc((T**)&weights.bias, weights.output_dims);
+    }
+    const size_t bit_size = getBitSize(weights.type);
+    if (bit_size >= 16) {  // fp16, fp32
+        deviceMalloc((T**)&weights.kernel, weights.input_dims * weights.output_dims);
+    }
+    else {  // int8, int4
+        const int factor = sizeof(float) * 8 / bit_size;
+        FT_CHECK(weights.input_dims % factor == 0);
+        deviceMalloc((int**)&weights.kernel, weights.input_dims * weights.output_dims / factor);
+        deviceMemSetZero((int*)weights.kernel, weights.input_dims * weights.output_dims / factor);
+        deviceMalloc((T**)&weights.scales, weights.input_dims / weights.group_size * weights.output_dims);
+        deviceMalloc((T**)&weights.zeros, weights.input_dims / weights.group_size * weights.output_dims);
+    }
+
+    if (weights.lora.r > 0) {
+        // FT_CHECK(bit_size >= 16);
+        deviceMalloc((T**)&weights.lora.a, weights.input_dims * weights.lora.r);
+        deviceMalloc((T**)&weights.lora.b, weights.lora.r * weights.output_dims);
+    }
+}
+
+template<typename T>
+inline void loadWeights(
+    LlamaDenseWeight<T>& w, std::string prefix, int rank, FtCudaDataType model_file_type, size_t tensor_para_size)
+{
+    auto weight_file  = prefix + "." + std::to_string(tensor_para_size - 1) + ".weight";
+    auto qweight_file = prefix + "." + std::to_string(tensor_para_size - 1) + ".qweight";
+    if (!std::filesystem::exists(weight_file) && !std::filesystem::exists(qweight_file)) {
+        TM_LOG_ERROR("%s and %s does not exist", weight_file.c_str(), qweight_file.c_str());
+        FT_CHECK(false);
+    }
+
+    prefix += "." + std::to_string(rank);
+
+    size_t     dim0 = w.input_dims;
+    size_t     dim1 = w.output_dims;
+    const auto type = model_file_type;
+
+    if (w.bias) {
+        loadWeightFromBin((T*)w.bias, {1, dim1}, prefix + ".bias", type);
+    }
+    const size_t bit_size = getBitSize(w.type);
+    if (bit_size >= 16) {  // fp16, fp32
+        loadWeightFromBin((T*)w.kernel, {dim0, dim1}, prefix + ".weight", type);
+    }
+    else {  // int8, int4
+        const int factor = sizeof(float) * 8 / bit_size;
+
+        FT_CHECK(dim1 % factor == 0);
+
+        std::vector<size_t> w_shape{dim0, dim1 / factor * sizeof(uint32_t)};
+        loadWeightFromBin((int8_t*)w.kernel, w_shape, prefix + ".qweight", FtCudaDataType::INT8);
+
+        const size_t group_count = w.group_size > 0 ? dim0 / w.group_size : 1;
+
+        loadWeightFromBin((half*)w.scales, {group_count, dim1}, prefix + ".scales", type);
+        loadWeightFromBin((half*)w.zeros, {group_count, dim1}, prefix + ".zeros", type);
+    }
+}
 
 }  // namespace turbomind

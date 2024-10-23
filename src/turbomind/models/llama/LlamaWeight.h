@@ -36,6 +36,7 @@ struct LlamaWeight {
                 size_t     inter_size,
                 size_t     vocab_size,
                 size_t     num_layer,
+                size_t     num_cross_layer,
                 bool       attn_bias,
                 WeightType weight_type,
                 int        group_size,
@@ -59,6 +60,9 @@ struct LlamaWeight {
     const T*                                 output_norm_weight{};
     const T*                                 post_decoder_embedding_kernel{};
 
+    LlamaDenseWeight<T> cross_kv{};
+    T*                  cross_norm{};
+
 private:
     void mallocWeights();
 
@@ -67,6 +71,8 @@ private:
     size_t     vocab_size_;
     size_t     vocab_size_padded_;
     size_t     num_layer_;
+    size_t     num_cross_layer_;
+    bool       attn_bias_;
     WeightType weight_type_;
     size_t     tensor_para_size_;
     size_t     tensor_para_rank_;

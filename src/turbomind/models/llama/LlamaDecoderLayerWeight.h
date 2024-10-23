@@ -31,6 +31,7 @@ struct LlamaDecoderLayerWeight {
 public:
     LlamaDecoderLayerWeight() = delete;
     LlamaDecoderLayerWeight(int        layer_idx,
+                            size_t     num_cross_layer,
                             size_t     head_num,
                             size_t     kv_head_num,
                             size_t     size_per_head,

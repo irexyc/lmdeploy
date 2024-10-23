@@ -224,6 +224,7 @@ LlamaTritonModel<T>::LlamaTritonModel(size_t      tensor_para_size,
     model_param_.kv_head_num        = model_reader["kv_head_num"].as<int>(0);
     model_param_.hidden_units       = model_reader["hidden_units"].as<int>();
     model_param_.layer_num          = model_reader["num_layer"].as<int>();
+    model_param_.cross_layer_num    = model_reader["num_cross_layer"].as<int>();
     model_param_.inter_size         = model_reader["inter_size"].as<int>();
     model_param_.vocab_size         = model_reader["vocab_size"].as<int>();
     model_param_.norm_eps           = model_reader["norm_eps"].as<float>();
@@ -412,6 +413,7 @@ void LlamaTritonModel<T>::createSharedWeights(int device_id, int rank)
                                                                model_param_.inter_size,
                                                                model_param_.vocab_size,
                                                                model_param_.layer_num,
+                                                               model_param_.cross_layer_num,
                                                                attn_bias_,
                                                                weight_type_,
                                                                group_size_,

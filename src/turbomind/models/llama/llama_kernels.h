@@ -167,4 +167,15 @@ inline void dump_sequence_len(int* d_seq_len, int step, int tp_rank, cudaStream_
     TM_LOG_ERROR("--------> rank = %d, step = %d, seq_len = %d <--------", tp_rank, step, h_seq_len);
 }
 
+template<typename T>
+void invokeKeepPrefillLastToken(T*           out1,
+                                T*           out2,
+                                T*           out3,
+                                const int*   cu_seqlens,
+                                int          w12,
+                                int          w3,
+                                int          dc_batch_size,
+                                int          pf_batch_size,
+                                cudaStream_t stream);
+
 }  // namespace turbomind

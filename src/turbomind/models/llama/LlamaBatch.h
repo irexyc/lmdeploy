@@ -296,6 +296,8 @@ private:
     int*   d_stop_words_{};  // [batch_size, 2, kMaxStopWordsLen]
     int*   d_bad_words_{};
 
+    bool h_has_return_logits_req_{};
+
     unsigned long long* h_random_seed_{};
     unsigned long long* d_random_seed_{};
 
