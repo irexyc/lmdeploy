@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from functools import partial
 from glob import glob
-from typing import Iterator, Tuple
+from typing import Iterator, List, Tuple
 
 import torch
 from safetensors import safe_open
@@ -45,6 +45,15 @@ class BaseLoader(ABC):
                 f'failed to locate weight files for {self.model_path}')
         return sorted(shards), index
 
+    def get_group_id(self, match):
+        """get group id given the match result of a pattern."""
+        assert match is not None
+        try:
+            idx = int(match[0])
+        except Exception:
+            idx = -1
+        return idx
+
     @abstractmethod
     def items(self) -> Iterator[Tuple[int, dict]]:
         pass
@@ -55,9 +64,11 @@ class SafetensorsLoader(BaseLoader):
     def __init__(self,
                  model_path: str,
                  pattern: str,
+                 misc_keys: List[str],
                  index_name=None,
                  file_pattern=None):
         super().__init__(model_path, pattern)
+        self.misc_keys = misc_keys
         self.shards, index = self.get_index(index_name, file_pattern)
         if not index:
             for shard in self.shards:
@@ -67,7 +78,7 @@ class SafetensorsLoader(BaseLoader):
         for k in index.keys():
             match = re.findall(self.pattern, k)
             if match:
-                self.item_count[int(match[0])] += 1
+                self.item_count[self.get_group_id(match)] += 1
 
     def items(self):
         params = defaultdict(dict)
@@ -77,9 +88,11 @@ class SafetensorsLoader(BaseLoader):
                 for k in f.keys():
                     match = re.findall(self.pattern, k)
                     if not match:
+                        if k not in self.misc_keys:
+                            continue
                         misc.append(k)
                     else:
-                        idx = int(match[0])
+                        idx = self.get_group_id(match)
                         param = params[idx]
                         param[k] = f.get_tensor(k)
                         if len(param) == self.item_count[idx]:
@@ -94,14 +107,16 @@ class PytorchLoader(BaseLoader):
     def __init__(self,
                  model_path: str,
                  pattern: str,
+                 misc_keys: List[str],
                  index_name=None,
                  file_pattern=None):
         super().__init__(model_path, pattern)
+        self.misc_keys = misc_keys
         self.shards, index = self.get_index(index_name, file_pattern)
         for k in index.keys():
             match = re.findall(self.pattern, k)
             if match:
-                self.item_count[int(match[0])] += 1
+                self.item_count[self.get_group_id(match)] += 1
 
     def items(self):
         params = defaultdict(dict)
@@ -111,9 +126,11 @@ class PytorchLoader(BaseLoader):
             for k, v in tmp.items():
                 match = re.findall(self.pattern, k)
                 if not match:
+                    if k not in self.misc_keys:
+                        continue
                     misc[k] = v
                 else:
-                    idx = int(match[0])
+                    idx = self.get_group_id(match)
                     params[idx][k] = v
             del tmp
             if misc:
@@ -133,28 +150,36 @@ class PytorchLoader(BaseLoader):
             yield (idx, params.pop(idx))
 
 
-def create_loader(model_path: str, pattern: str) -> BaseLoader:
+def create_loader(model_path: str, pattern: str,
+                  misc_keys: List[str]) -> BaseLoader:
     args = (model_path, pattern)
+    kwargs = dict(misc_keys=misc_keys)
 
     if osp.exists(osp.join(model_path, SAFE_WEIGHT_INDEX_NAME)):
-        return SafetensorsLoader(*args, index_name=SAFE_WEIGHT_INDEX_NAME)
+        return SafetensorsLoader(*args,
+                                 **kwargs,
+                                 index_name=SAFE_WEIGHT_INDEX_NAME)
 
     if glob(osp.join(model_path, SAFE_WEIGHT_PATTERN)):
-        return SafetensorsLoader(*args, file_pattern=SAFE_WEIGHT_PATTERN)
+        return SafetensorsLoader(*args,
+                                 **kwargs,
+                                 file_pattern=SAFE_WEIGHT_PATTERN)
 
     if osp.exists(osp.join(model_path, WEIGHT_INDEX_NAME)):
-        return PytorchLoader(*args, index_name=WEIGHT_INDEX_NAME)
+        return PytorchLoader(*args, **kwargs, index_name=WEIGHT_INDEX_NAME)
 
     if glob(osp.join(model_path, WEIGHT_PATTERN)):
-        return PytorchLoader(*args, file_pattern=WEIGHT_PATTERN)
+        return PytorchLoader(*args, **kwargs, file_pattern=WEIGHT_PATTERN)
 
     # non-standard safetensors model (*.safetensors)
     if glob(osp.join(model_path, EXTRA_SAFE_WEIGHT_PATTERN)):
-        return SafetensorsLoader(*args, file_pattern=EXTRA_SAFE_WEIGHT_PATTERN)
+        return SafetensorsLoader(*args,
+                                 **kwargs,
+                                 file_pattern=EXTRA_SAFE_WEIGHT_PATTERN)
 
     # non-standard pytorch model (*.bin, *.pt)
     for p in EXTRA_WEIGHT_PATTERNS:
         if glob(osp.join(model_path, p)):
-            return PytorchLoader(*args, file_pattern=p)
+            return PytorchLoader(*args, **kwargs, file_pattern=p)
 
     raise RuntimeError(f'Failed to find valid loader for {model_path}')

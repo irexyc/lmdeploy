@@ -100,6 +100,12 @@ class LlamaReader(BaseReader):
         return self.params[
             f'{self.attn_layer_prefix}.{i}.post_attention_layernorm.weight']
 
+    @classmethod
+    def get_misc_keys(cls):
+        return [
+            cls.tok_embeddings_key, cls.norm_weight_key, cls.output_weight_key
+        ]
+
 
 @INPUT_MODELS.register_module(name='llama')
 class LlamaModel(BaseInputModel):
@@ -114,7 +120,8 @@ class LlamaModel(BaseInputModel):
         self.model_config = self.model_config.to_dict()
 
     def readers(self):
-        loader = create_loader(self.model_path, self.Reader.attn_layer_patten)
+        loader = create_loader(
+            self.model_path, self.Reader.attn_layer_patten, self.Reader.get_misc_keys())
         for i, param in loader.items():
             reader = self.Reader(param, {},
                                  False,
@@ -138,7 +145,13 @@ class LlamaModel(BaseInputModel):
         params_path = osp.join(self.model_path, 'config.json')
         with open(params_path) as f:
             model_arg = json.load(f)
-            num_layer = model_arg['num_hidden_layers']
+            num_layer = model_arg.get('num_hidden_layers')
+            num_cross_layer = 0
+            if num_layer is None:
+                # internlm3 yoco
+                num_cross_layer = model_arg['num_cross_decoder_layers']
+                num_layer = num_cross_layer + \
+                    model_arg['num_self_decoder_layers']
             norm_eps = model_arg['rms_norm_eps']
             attn_head_num = model_arg['num_attention_heads']
             vocab_size = model_arg['vocab_size']
@@ -179,6 +192,7 @@ class LlamaModel(BaseInputModel):
 
         return dict(
             num_layer=num_layer,
+            num_cross_layer=num_cross_layer,
             norm_eps=norm_eps,
             head_num=attn_head_num,
             kv_head_num=kv_head_num,

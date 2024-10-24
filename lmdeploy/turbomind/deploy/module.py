@@ -14,6 +14,8 @@ def permute_v2(x: torch.Tensor, size_per_head: int = 128):
         Contract: x.size(-1) is output dims
     """
 
+    if x.size(-1) == 0:
+        return x
     assert x.size(-1) > 1
 
     output_dims = x.size(-1)
@@ -31,7 +33,8 @@ def merge_qkv_v2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, tp: int):
     def reshape(x):
         return x.view(x.size(0), tp, -1) if q.dim() == 2 else x.view(tp, -1)
 
-    qkv = torch.cat(tuple(map(reshape, (q, k, v))), dim=-1)
+    qkv = [x for x in [q, k, v] if x is not None]
+    qkv = torch.cat(tuple(map(reshape, qkv)), dim=-1)
 
     qkv = qkv.view(-1, qkv.size(-1) * tp)
     if q.dim() == 1:
@@ -208,6 +211,40 @@ class Attn(Module):
             e(self._export, partial(r.attn, i), i)
 
 
+class CrossKV(Module):
+
+    _cross_kv = 'cross_decoder.{0}.{1}'
+
+    def __init__(self, model: BaseOutputModel):
+        self.model = model
+        self.tp = model.tensor_para_size
+        self.head_dim = model.model_config.size_per_head
+        self.attn_bias = model.model_config.attn_bias
+
+    def _reorder_and_merge(self, kv):
+        k, v = map(transpose, kv)
+        # reorder output dim for tm's rotary embedding layout
+        if self.model.permute_qk:
+            k = permute_v2(k, self.head_dim)
+        kv = merge_qkv_v2(k, v, None, self.tp)
+        return kv
+
+    def _export(self, _: int, kv, kind: str, pack_fn, **kwargs):
+        if all(x is None for x in kv):
+            return
+        kv = self._reorder_and_merge(kv)
+        self.model.save_split(pack_fn(kv),
+                              self._cross_kv.format('w_kv', kind),
+                              split_dim=-1)
+
+    def apply(self, i: int, r: BaseReader):
+        for e in get_params(r.cross_kv(None), bias=self.attn_bias):
+            e(self._export, r.cross_kv, i)
+        cross_norm = r.cross_norm()
+        if cross_norm is not None:
+            self.model.save_split(cross_norm, 'cross_decoder.norm.weight')
+
+
 class Misc(Module):
     """
     requires:
@@ -252,6 +289,8 @@ class Transformer:
         modules = [Attn, LayerNorm, ffn]
         self.modules = [c(model) for c in modules]
         self.misc = Misc(model)
+        if model.model_config.num_cross_layer:
+            self.cross_kv = CrossKV(model)  # internlm3
 
     def __call__(self, i: int, r: BaseReader):
         if i >= 0:
@@ -260,3 +299,5 @@ class Transformer:
             return 1
         else:
             self.misc(i, r)
+            if self.model.model_config.num_cross_layer:
+                self.cross_kv(i, r)

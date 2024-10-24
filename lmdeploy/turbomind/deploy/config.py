@@ -36,6 +36,7 @@ class ModelConfig:
     hidden_units: int = None
     vocab_size: int = None
     num_layer: int = None
+    num_cross_layer: int = 0
     inter_size: int = None
     norm_eps: float = None
     attn_bias: int = 0
