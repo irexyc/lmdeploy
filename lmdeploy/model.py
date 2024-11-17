@@ -438,6 +438,7 @@ class InternLMChat7B(BaseChatTemplate):
             return 'internlm'
 
 
+@MODELS.register_module(name='internlm3')
 @MODELS.register_module(name='internlm2')
 class InternLM2Chat7B(InternLMChat7B):
     """Chat template and generation parameters of InternLM2-Chat-7B."""
@@ -480,6 +481,8 @@ class InternLM2Chat7B(InternLMChat7B):
         path = model_path.lower()
         if 'internlm2' in path and ('chat' in path or 'math' in path):
             return 'internlm2'
+        if 'internlm3' in path and ('chat' in path or 'math' in path):
+            return 'internlm3'
 
     def messages2prompt(self,
                         messages,
