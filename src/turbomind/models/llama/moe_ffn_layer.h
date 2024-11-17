@@ -28,7 +28,8 @@ public:
     {
         model.inter_size = param.inter_size;
 
-        global_scale_ = param.global_scale;
+        residual_scale_     = param.residual_scale;
+        fixed_shared_scale_ = param.shared_scale;
 
         if (param_.method == MoeParam::kFused) {
             context_ = std::make_unique<gemm::MoeGemmContext>(
@@ -88,12 +89,14 @@ private:
     int*   f2n_{};
     int*   en2f_{};
     float* scales_{};
-    float  global_scale_{};
 
     float* shared_scales_{};
 
     int* accum_{};
     int* offsets_{};
+
+    float fixed_shared_scale_{};  // manually specify shared expert scale
+    float residual_scale_{};      // residual + hidden_states * residual_scale_
 };
 
 }  // namespace turbomind

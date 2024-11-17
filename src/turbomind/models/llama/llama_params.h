@@ -37,7 +37,8 @@ struct MoeParam {
     int   inter_size;
     bool  norm_topk;
     bool  shared_gate;
-    float global_scale;
+    float shared_scale;
+    float residual_scale;
 };
 
 struct AttentionParam {

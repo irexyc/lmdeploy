@@ -8,6 +8,7 @@ class InternLM3MoeReader(InternLM2Reader):
     ffn_pattern = r'shared_experts\.'
 
     def moe_ffn_expert(self, e=None, i=None, kind=None):
+        assert kind != 'bias', 'not supported'
         if not kind:
             return self.filter(r'feed_forward')
         result = []
@@ -21,11 +22,8 @@ class InternLM3MoeReader(InternLM2Reader):
         w1e = w1.view(-1, hidden_dim, w1.shape[-1])[e]
         w3e = w3.view(-1, hidden_dim, w3.shape[-1])[e]
         w2e = w2.view(-1, inter_size, w2.shape[-1])[e]
-        residual_scale = float(self.model_cfg['residual_scale_factor'])
         for t in [w1e, w2e, w3e]:
             tensor = self.transform(t, kind).t().contiguous()
-            if kind == 'bias':
-                tensor *= residual_scale
             result.append(tensor)
         return (*result, )
 
@@ -34,7 +32,7 @@ class InternLM3MoeReader(InternLM2Reader):
 
     def _ffn(self, i: int, kind: str):
         """Get ffn kind for layer i."""
-        assert (0), 'not supported'
+        assert kind != 'bias', 'not supported'
         if not kind:
             return self.filter(self.ffn_pattern)
         result = []
@@ -61,11 +59,12 @@ class InternLM3MoeModel(LlamaModel):
         info['expert_inter_size'] = cfg['intermediate_size']
         info['experts_per_token'] = cfg['num_experts_per_tok']
         info['moe_norm_topk'] = True
-        info['moe_global_scale'] = cfg['residual_scale_factor']
+        info['moe_residual_scale'] = cfg['residual_scale_factor']
+        info['moe_shared_gate'] = False
         if cfg.get('num_shared_experts', 0) > 0:
-            info['moe_shared_gate'] = True
             info['inter_size'] = info['inter_size'] * cfg.get(
                 'num_shared_experts')
+            info['moe_shared_scale'] = cfg['residual_scale_factor']
         else:
             info['inter_size'] = 0
 
