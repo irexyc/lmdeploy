@@ -485,7 +485,7 @@ __global__ void MoeGateKernel_v8(float*       scales,  // [e,n]
 
     PRAGMA_UNROLL
     for (int i = 0; i < items_per_thread; ++i) {
-        if (!norm_topk || used[i]) {
+        if (norm_topk || used[i]) {
             data[i] = exp2f(data[i] - max_logit);
             sum_prob += data[i];
         }
@@ -681,9 +681,10 @@ void invokeMoeGather(T* dst, const T* src, const int* f2n, int tokens, int exper
 template void invokeMoeGather(uint16_t*, const uint16_t*, const int*, int, int, int, cudaStream_t);
 
 template<int vec_size, int exp_k, int block_dim, class T>
-__global__ void MoeReduceKernel(T*           dst,         // [  n, d]
-                                const T*     src,         // [e*n, d]
-                                const float* scales,      // [  e, n]
+__global__ void MoeReduceKernel(T*           dst,     // [  n, d]
+                                const T*     src,     // [e*n, d]
+                                const float* scales,  // [  e, n]
+                                const float  global_scale,
                                 const int*   en2f,        // [  e, n] :: (e,n) -> e*n
                                 const float* dst_scales,  // [n]
                                 int          dims,
@@ -723,7 +724,7 @@ __global__ void MoeReduceKernel(T*           dst,         // [  n, d]
             Vec v;
             Ldg(v, src_ptr[e][i].data());
             using namespace ops;
-            const auto x = cast<float>(v) * scale[e];
+            const auto x = cast<float>(v) * scale[e] * global_scale;
             accum        = accum + x;
         }
         Store(dst_ptr[i].data(), cast<T>(accum));
@@ -734,6 +735,7 @@ template<class T>
 void invokeMoeReduce(T*           dst,
                      const T*     src,
                      const float* scales,
+                     const float  global_scale,
                      const int*   en2f,
                      const float* dst_scales,
                      int          tokens,
@@ -751,6 +753,7 @@ void invokeMoeReduce(T*           dst,
             dst,
             src,
             scales,
+            global_scale,
             en2f,
             dst_scales,
             dims / vec_size,
@@ -774,10 +777,11 @@ void invokeMoeReduce(T*           dst,
     }
 }
 
-template void invokeMoeReduce(half*, const half*, const float*, const int*, const float*, int, int, int, cudaStream_t);
-#ifdef ENABLE_BF16
 template void
-invokeMoeReduce(nv_bfloat16*, const nv_bfloat16*, const float*, const int*, const float*, int, int, int, cudaStream_t);
+invokeMoeReduce(half*, const half*, const float*, const float, const int*, const float*, int, int, int, cudaStream_t);
+#ifdef ENABLE_BF16
+template void invokeMoeReduce(
+    nv_bfloat16*, const nv_bfloat16*, const float*, const float, const int*, const float*, int, int, int, cudaStream_t);
 #endif
 
 std::vector<int> SampleUniform(int token_num, int expert_num, int exp_per_tok, std::mt19937& g)

@@ -26,8 +26,12 @@ class InternLM2Reader(LlamaReader):
         qkv = self.params.get(
             f'{self.attn_layer_prefix}.{i}.attention.wqkv.{kind}')
         qkv = self.transform(qkv, kind)
+        attn_head_num = int(self.model_cfg['num_attention_heads'])
+        hidden_units = int(self.model_cfg['hidden_size'])
+        head_dim = int(
+            self.model_cfg.get('head_dim', hidden_units // attn_head_num))
         if qkv is not None:
-            qkv = qkv.view(kv_head_num, gs + 2, 128, -1)
+            qkv = qkv.view(kv_head_num, gs + 2, head_dim, -1)
             hidden_dim = qkv.shape[-1]
             q, k, v = torch.split(qkv, [gs, 1, 1], dim=1)
             q = q.reshape(-1, hidden_dim)

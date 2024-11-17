@@ -309,6 +309,7 @@ LlamaTritonModel<T>::LlamaTritonModel(size_t      tensor_para_size,
     moe_param_.experts_per_token = model_reader["experts_per_token"].as<int>(0);
     moe_param_.inter_size        = model_reader["expert_inter_size"].as<int>(0);
     moe_param_.shared_gate       = model_reader["moe_shared_gate"].as<int>(0);
+    moe_param_.global_scale      = model_reader["moe_global_scale"].as<float>(1.0f);
     moe_param_.norm_topk         = model_reader["moe_norm_topk"].as<bool>(false);
 
     handleMissingParams();

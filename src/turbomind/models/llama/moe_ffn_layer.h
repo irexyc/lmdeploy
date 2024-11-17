@@ -28,6 +28,8 @@ public:
     {
         model.inter_size = param.inter_size;
 
+        global_scale_ = param.global_scale;
+
         if (param_.method == MoeParam::kFused) {
             context_ = std::make_unique<gemm::MoeGemmContext>(
                 param.expert_num, param.experts_per_token, ctx.cuda_device_prop, stream_);
@@ -86,6 +88,7 @@ private:
     int*   f2n_{};
     int*   en2f_{};
     float* scales_{};
+    float  global_scale_{};
 
     float* shared_scales_{};
 

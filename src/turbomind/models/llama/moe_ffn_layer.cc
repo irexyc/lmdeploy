@@ -222,6 +222,7 @@ void MoeFfnLayer<T>::reduce(T* output, int tokens, const MoeFfnWeight<T>& moe)
     invokeMoeReduce(output,
                     inout_buf_,
                     scales_,
+                    global_scale_,
                     en2f_,
                     moe.shared_gate.kernel ? shared_scales_ : nullptr,
                     tokens,

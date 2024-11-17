@@ -49,6 +49,7 @@ template<class T>
 void invokeMoeReduce(T*           dst,
                      const T*     src,
                      const float* scales,
+                     const float  global_scale,
                      const int*   en2f,
                      const float* dst_scales,
                      int          tokens,

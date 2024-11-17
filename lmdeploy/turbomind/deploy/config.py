@@ -57,6 +57,7 @@ class ModelConfig:
     expert_num: int = 0
     expert_inter_size: int = 0
     experts_per_token: int = 0
+    moe_global_scale: float = 1.0
     moe_shared_gate: int = False
     moe_norm_topk: int = False
 

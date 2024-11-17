@@ -3,6 +3,7 @@ from .baichuan import Baichuan2Model, BaichuanModel  # noqa: F401
 from .deepseek_vl import DeepSeekVLModel  # noqa: F401
 from .glm4 import Glm4Model  # noqa: F401
 from .internlm2 import InternLM2Model  # noqa: F401
+from .internlm3 import InternLM3MoeModel  # noqa: F401
 from .internvl import InternVLModel  # noqa: F401
 from .llama import LlamaModel  # noqa: F401
 from .llava import LlavaModel  # noqa: F401
