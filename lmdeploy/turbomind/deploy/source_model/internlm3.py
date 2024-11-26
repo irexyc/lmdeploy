@@ -55,6 +55,7 @@ class InternLM3MoeModel(LlamaModel):
     def model_info(self):
         cfg = self.model_config
         info = super().model_info()
+        info['attn_bias'] = int(cfg.get('qkv_bias', False))
         info['expert_num'] = cfg['num_routed_experts']
         info['expert_inter_size'] = cfg['intermediate_size']
         info['experts_per_token'] = cfg['num_experts_per_tok']

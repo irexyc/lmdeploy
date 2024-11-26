@@ -60,7 +60,7 @@ class ModelConfig:
     moe_residual_scale: float = 1.0
     moe_shared_scale: float = 0.0
     moe_shared_gate: int = False
-    moe_norm_topk: int = False
+    moe_norm_topk: bool = False
 
     def verify(self):
         invalid = {}

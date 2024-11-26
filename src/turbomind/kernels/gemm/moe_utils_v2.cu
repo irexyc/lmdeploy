@@ -413,7 +413,13 @@ __global__ void MoeGateKernel_v8(float*       scales,  // [e,n]
 
 #endif
 
-    constexpr float kLog2e = 1.4426950408889634074;
+    // constexpr float kLog2e = 1.4426950408889634074;
+    // if (k == 0) {
+    //     PRAGMA_UNROLL
+    //     for (int i = 0; i < items_per_thread; ++i) {
+    //         data[i] *= kLog2e;
+    //     }
+    // }
 
     unsigned mask = (unsigned)-1;
     float    max_logit;
@@ -435,13 +441,6 @@ __global__ void MoeGateKernel_v8(float*       scales,  // [e,n]
                 max_val = data[i];
             }
             asm("shl.b32 %0, %1, 1;\n" : "=r"(bit) : "r"(bit));
-        }
-
-        if (k == 0) {
-            PRAGMA_UNROLL
-            for (int i = 0; i < items_per_thread; ++i) {
-                data[i] *= kLog2e;
-            }
         }
 
         int   g_max_ei  = ei;
@@ -485,8 +484,8 @@ __global__ void MoeGateKernel_v8(float*       scales,  // [e,n]
 
     PRAGMA_UNROLL
     for (int i = 0; i < items_per_thread; ++i) {
-        if (norm_topk || used[i]) {
-            data[i] = exp2f(data[i] - max_logit);
+        if (!norm_topk || used[i]) {
+            data[i] = expf(data[i] - max_logit);
             sum_prob += data[i];
         }
     }
