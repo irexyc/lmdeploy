@@ -5,6 +5,7 @@
 #include "src/turbomind/models/llama/llama_utils.h"
 #include "src/turbomind/models/llama/moe_ffn_layer.h"
 #include "src/turbomind/models/llama/unified_attention_layer.h"
+#include "src/turbomind/utils/Tensor.h"
 #include "src/turbomind/utils/anomaly_handler.h"
 #include "src/turbomind/utils/cuda_utils.h"
 #include <cuda_runtime.h>
@@ -23,17 +24,19 @@ UnifiedDecoder<T>::UnifiedDecoder(const ModelParam&     model,
     rmsnorm_eps_(model.norm_eps),
     stream_(ctx.stream),
     allocator_(ctx.allocator.get()),
-    dtype_(getTensorType<T>())
+    tp_(tp),
+    dtype_(getTensorType<T>()),
+    tune_layer_num_(model.tune_layer_num)
 {
 
     attn_layer_ = std::make_unique<UnifiedAttentionLayer<T>>(model, attn, lora, tp, ctx);
 
-    if (moe.expert_num) {
+    if (std::accumulate(moe.expert_num.begin(), moe.expert_num.end(), 0LL)) {
         moe_ffn_layer_ = std::make_unique<MoeFfnLayer<T>>(model, moe, tp, ctx);
     }
 
-    if (model.inter_size) {
-        ffn_layer_ = std::make_unique<LlamaFfnLayer<T>>(model, tp, ctx, !moe_ffn_layer_);
+    if (std::accumulate(model.inter_size.begin(), model.inter_size.end(), 0LL)) {
+        ffn_layer_ = std::make_unique<LlamaFfnLayer<T>>(model, tp, ctx);
     }
 
     check_cuda_error(cudaEventCreateWithFlags(&ev_h_cu_x_, cudaEventDisableTiming));
@@ -65,13 +68,13 @@ void UnifiedDecoder<T>::freeBuffer()
 }
 
 template<typename T>
-void UnifiedDecoder<T>::forwardSelfAttn(T*                             attn_io,
-                                        TensorMap*                     _outputs,
-                                        const TensorMap*               _inputs,
-                                        size_t                         token_num,
-                                        size_t                         batch_size,
-                                        int                            layer_id,
-                                        const LlamaAttentionWeight<T>* weight)
+void UnifiedDecoder<T>::forwardSelfAttn(T*                attn_io,
+                                        TensorMap*        _outputs,
+                                        const TensorMap*  _inputs,
+                                        size_t            token_num,
+                                        size_t            batch_size,
+                                        int               layer_id,
+                                        const WeightType* weight)
 {
     TensorMap inputs(*_inputs);
     inputs.insert("input_query", {MEMORY_GPU, dtype_, {token_num, hidden_units_}, attn_io});
@@ -84,7 +87,7 @@ void UnifiedDecoder<T>::forwardSelfAttn(T*                             attn_io,
     TensorMap outputs(*_outputs);
     outputs.insert("hidden_features", {MEMORY_GPU, dtype_, {token_num, hidden_units_}, attn_io});
 
-    attn_layer_->forward(&outputs, &inputs, weight);
+    attn_layer_->forward(&outputs, &inputs, &weight->self_attn_weights);
 }
 
 template<typename T>
@@ -161,7 +164,7 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
     for (size_t layer = 0; layer < layer_num_; ++layer) {
 
         /// TODO: do not skip the layers when they are heterogeneous
-        if (isTuning() && layer != 0) {
+        if (isTuning() && layer >= tune_layer_num_) {
             continue;
         }
 
@@ -175,7 +178,7 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
                         token_num,
                         batch_size,
                         layer,
-                        &weights->at(layer)->self_attn_weights);
+                        weights->at(layer));
 
         count_and_fix(decoder_output, token_num * hidden_units_, Concat("attn_block", layer), 2);
 
@@ -195,14 +198,21 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
         ////////////////////////////////////////////
         /// feed-forward network
 
-        if (!weights->at(layer)->moe_weights.experts.empty()) {
+        // if (tp_.rank_ == 0) {
+        //     Compare(decoder_output, token_num * hidden_units_, Concat("ffn_input", layer), compare_mode, stream_);
+        // }
+
+        const bool is_moe = !weights->at(layer)->moe_weights.experts.empty();
+        if (is_moe) {
             moe_ffn_layer_->forward(nullptr, decoder_output, token_num, layer, weights->at(layer)->moe_weights);
         }
 
-        if (ffn_layer_) {
-            int       layer_id = layer;  // int is needed
+        if (weights->at(layer)->ffn_weights.output.kernel) {
+            int       layer_id   = layer;  // int is needed
+            bool      all_reduce = !is_moe;
             TensorMap ffn_inputs{{"ffn_input", {MEMORY_GPU, dtype_, {token_num, hidden_units_}, decoder_output}},
-                                 {"layer_id", {MEMORY_CPU, TYPE_INT32, {1}, &layer_id}}};
+                                 {"layer_id", {MEMORY_CPU, TYPE_INT32, {1}, &layer_id}},
+                                 {"all_reduce", {MEMORY_CPU, TYPE_BOOL, {1}, &all_reduce}}};
             TensorMap ffn_outputs{{"ffn_output", {MEMORY_GPU, dtype_, {token_num, hidden_units_}, decoder_output}}};
             if (inputs->isExist("lora_mask")) {
                 ffn_inputs.insert({"lora_mask", inputs->at("lora_mask")});
@@ -210,9 +220,17 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
             ffn_layer_->forward(&ffn_outputs, &ffn_inputs, &weights->at(layer)->ffn_weights);
         }
 
-        if (!weights->at(layer)->moe_weights.experts.empty()) {
-            moe_ffn_layer_->reduce(decoder_output, token_num, weights->at(layer)->moe_weights);
+        // if (tp_.rank_ == 0) {
+        //     Compare(decoder_output, token_num * hidden_units_, Concat("ffn_out", layer), compare_mode, stream_);
+        // }
+
+        if (is_moe) {
+            moe_ffn_layer_->reduce(decoder_output, token_num, (bool)ffn_layer_, layer, weights->at(layer)->moe_weights);
         }
+
+        // if (tp_.rank_ == 0) {
+        //     Compare(decoder_output, token_num * hidden_units_, Concat("moe_ffn_out", layer), compare_mode, stream_);
+        // }
 
         count_and_fix(decoder_output, token_num * hidden_units_, Concat("ffn_block", layer), 2);
 
@@ -260,6 +278,15 @@ void UnifiedDecoder<T>::forward(TensorMap* outputs, const TensorMap* inputs, con
 
     // Wait for `h_cu_q/k_len_` to be consumed
     check_cuda_error(cudaEventSynchronize(ev_h_cu_x_));
+
+    // check_cuda_error(cudaStreamSynchronize(stream_));
+    // if (tp_.rank_ == 0) {
+    //     std::abort();
+    // }
+    // else {
+    //     while (1)
+    //         ;
+    // }
 }
 
 #ifdef ENABLE_FP32

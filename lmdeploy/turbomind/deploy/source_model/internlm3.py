@@ -59,7 +59,7 @@ class InternLM3MoeModel(LlamaModel):
         info['expert_num'] = cfg['num_routed_experts']
         info['expert_inter_size'] = cfg['intermediate_size']
         info['experts_per_token'] = cfg['num_experts_per_tok']
-        info['moe_norm_topk'] = True
+        info['norm_topk_prob'] = True
         info['moe_residual_scale'] = cfg['residual_scale_factor']
         info['moe_shared_gate'] = False
         if cfg.get('num_shared_experts', 0) > 0:
