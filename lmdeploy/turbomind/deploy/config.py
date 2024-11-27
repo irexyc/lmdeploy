@@ -60,7 +60,7 @@ class ModelConfig:
     experts_per_token: int = 0
     moe_residual_scale: float = 1.0
     moe_shared_scale: float = 0.0
-    moe_shared_gate: int = False
+    moe_shared_gate: bool = False
     norm_topk_prob: bool = False
     routed_scale: float = 1.0
     topk_group: int = 1
