@@ -7,16 +7,24 @@ import json
 import os
 import random
 import time
+from multiprocessing import Process
 from queue import Queue
-from typing import List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
+import zmq.asyncio
 from tqdm import tqdm
 
 from lmdeploy.cli.utils import ArgumentHelper, DefaultsAndTypesHelpFormatter
 from lmdeploy.messages import (GenerationConfig, PytorchEngineConfig,
                                TurbomindEngineConfig)
 from lmdeploy.pytorch.engine import EngineInstance
+from lmdeploy.serve.tokenization import (DeTokenizeInput, DeTokenizeOutput,
+                                         ProcessArgs, ProcessOutput,
+                                         TokenizeInput, TokenizeOutput,
+                                         get_zmq_socket,
+                                         run_detokenize_process,
+                                         run_tokenize_process)
 from lmdeploy.tokenizer import DetokenizeState, Tokenizer
 from lmdeploy.utils import get_logger
 
@@ -87,6 +95,33 @@ class Engine:
         self.csv = csv
         self.pbar = None
 
+    async def _tokenize_one_request(self, input: TokenizeInput):
+        self.tokenize_state[input.session_id] = ProcessOutput(
+            None, asyncio.Event())
+        await self.send_to_tokenizer.send_pyobj(input)
+        while not self.tokenize_state[input.session_id].event.is_set():
+            await self._tokenize_step()
+        return self.tokenize_state[input.session_id].result.input_ids
+
+    async def _tokenize_step(self):
+        result: TokenizeOutput = await self.recv_from_tokenizer.recv_pyobj()
+        self.tokenize_state[result.session_id].result = result
+        self.tokenize_state[result.session_id].event.set()
+
+    async def _detokenize_one_request(self, input: DeTokenizeInput):
+        self.detokenize_state[input.session_id] = ProcessOutput(
+            None, asyncio.Event())
+        await self.send_to_detokenizer.send_pyobj(input)
+        if not input.sequence_start:
+            while not self.detokenize_state[input.session_id].event.is_set():
+                await self._detokenize_step()
+            return self.detokenize_state[input.session_id].result.response
+
+    async def _detokenize_step(self):
+        result: DeTokenizeOutput = await self.recv_from_detokenizer.recv_pyobj()
+        self.detokenize_state[result.session_id].result = result
+        self.detokenize_state[result.session_id].event.set()
+
     async def _inference(self, req_queue: Queue, session_id: int,
                          temperature: float, top_p: float, top_k: int,
                          stream_output: bool, skip_tokenize: bool,
@@ -102,12 +137,18 @@ class Engine:
             if skip_tokenize:
                 input_ids = prompt
             else:
-                input_ids = self.tokenizer(prompt).input_ids
+                input_ids = await self._tokenize_one_request(
+                    TokenizeInput(session_id, prompt, True))
+                # input_ids = self.tokenizer(prompt).input_ids
 
             state = DetokenizeState(len(input_ids))
 
             prev_len = 0
             token_ids = input_ids.copy()
+
+            if not skip_detokenize:
+                await self._detokenize_one_request(
+                    DeTokenizeInput(session_id, True, input_ids))
 
             async for outputs in model_inst.async_stream_infer(
                     session_id,
@@ -124,8 +165,12 @@ class Engine:
                 if n_token > prev_len:
                     token_ids += outputs.token_ids[prev_len - n_token:]
                     if not skip_detokenize:
-                        _, state = self.tokenizer.detokenize_incrementally(
-                            token_ids, state)
+                        # _, state = self.tokenizer.detokenize_incrementally(
+                        #     token_ids, state)
+                        _ = await self._detokenize_one_request(
+                            DeTokenizeInput(
+                                session_id, False,
+                                outputs.token_ids[prev_len - n_token:]))
                     ts.append(time.perf_counter())
                     ns.append(n_token)
                     prev_len = n_token
@@ -154,6 +199,30 @@ class Engine:
 
         event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(event_loop)
+
+        process_args = ProcessArgs.init_new()
+        context = zmq.asyncio.Context()
+        self.tokenize_state: Dict[int, ProcessOutput] = {}
+        self.send_to_tokenizer = get_zmq_socket(context, zmq.PUSH,
+                                                process_args.to_tokenize_name)
+        self.recv_from_tokenizer = get_zmq_socket(
+            context, zmq.PULL, process_args.from_tokenize_name)
+        tokenize_proc = Process(
+            target=run_tokenize_process,
+            args=(self.tokenizer, process_args),
+        )
+        tokenize_proc.start()
+
+        self.detokenize_state: Dict[int, ProcessOutput] = {}
+        self.send_to_detokenizer = get_zmq_socket(
+            context, zmq.PUSH, process_args.to_detokenize_name)
+        self.recv_from_detokenizer = get_zmq_socket(
+            context, zmq.PULL, process_args.from_detokenize_name)
+        detokenize_proc = Process(
+            target=run_detokenize_process,
+            args=(self.tokenizer, process_args),
+        )
+        detokenize_proc.start()
 
         # start threads
         tasks = []
