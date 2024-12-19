@@ -35,11 +35,14 @@ class InternLM3MoeReader(InternLM2Reader):
         assert kind != 'bias', 'not supported'
         if not kind:
             return self.filter(self.ffn_pattern)
+        residual_scale_factor = float(self.model_cfg['residual_scale_factor'])
         result = []
         for key in ['gate', 'down', 'up']:
             tensor = self.params[
                 f'{self.attn_layer_prefix}.{i}.feed_forward.shared_experts.{key}_proj.{kind}']  # noqa: E501
             tensor = self.transform(tensor, kind)
+            if kind in ['weight', 'scales']:
+                tensor *= residual_scale_factor
             result.append(tensor)
         return (*result, )
 
@@ -60,12 +63,9 @@ class InternLM3MoeModel(LlamaModel):
         info['expert_inter_size'] = cfg['intermediate_size']
         info['experts_per_token'] = cfg['num_experts_per_tok']
         info['norm_topk_prob'] = True
-        info['moe_residual_scale'] = cfg['residual_scale_factor']
         info['moe_shared_gate'] = False
         if cfg.get('num_shared_experts', 0) > 0:
-            info['inter_size'] = info['inter_size'] * cfg.get(
-                'num_shared_experts')
-            info['moe_shared_scale'] = cfg['residual_scale_factor']
+            assert (0), 'not supported'
         else:
             info['inter_size'] = 0
 

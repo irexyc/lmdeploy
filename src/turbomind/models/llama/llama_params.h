@@ -51,8 +51,6 @@ struct MoeParam {
     bool  norm_topk_prob;
     bool  shared_gate;
     float routed_scale;
-    float shared_scale;
-    float residual_scale;
 
     int         topk_group;
     std::string topk_method;

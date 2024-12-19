@@ -703,13 +703,11 @@ void invokeMoeGather(T* dst, const T* src, const int* f2n, int tokens, int exper
 template void invokeMoeGather(uint16_t*, const uint16_t*, const int*, int, int, int, cudaStream_t);
 
 template<int vec_size, int exp_k, int block_dim, class T>
-__global__ void MoeReduceKernel(T*           dst,     // [  n, d]
-                                const T*     src,     // [e*n, d]
-                                const float* scales,  // [  e, n]
-                                const float  residual_scale,
+__global__ void MoeReduceKernel(T*           dst,         // [  n, d]
+                                const T*     src,         // [e*n, d]
+                                const float* scales,      // [  e, n]
                                 const int*   en2f,        // [  e, n] :: (e,n) -> e*n
                                 const float* dst_scales,  // [n]
-                                const float  fixed_dst_scale,
                                 int          dims,
                                 int          tokens,
                                 float        dst_scale)
@@ -723,9 +721,6 @@ __global__ void MoeReduceKernel(T*           dst,     // [  n, d]
     if (dst_scales) {
         dst_scale = dst_scales[ti];
         dst_scale = fdividef(1.f, 1.f + expf(-dst_scale));
-    }
-    if (fixed_dst_scale) {
-        dst_scale = fixed_dst_scale;
     }
 
     // Should be warp uniforms
@@ -751,7 +746,7 @@ __global__ void MoeReduceKernel(T*           dst,     // [  n, d]
             Vec v;
             Ldg(v, src_ptr[e][i].data());
             using namespace ops;
-            const auto x = cast<float>(v) * scale[e] * residual_scale;
+            const auto x = cast<float>(v) * scale[e];
             accum        = accum + x;
         }
         Store(dst_ptr[i].data(), cast<T>(accum));
@@ -780,10 +775,8 @@ template<class T>
 void invokeMoeReduce(T*           dst,
                      const T*     src,
                      const float* scales,
-                     const float  residual_scale,
                      const int*   en2f,
                      const float* dst_scales,
-                     const float  fixed_dst_scale,
                      int          tokens,
                      int          experts_per_token,
                      int          dims,
@@ -800,10 +793,8 @@ void invokeMoeReduce(T*           dst,
             dst,
             src,
             scales,
-            residual_scale,
             en2f,
             dst_scales,
-            fixed_dst_scale,
             dims / vec_size,
             tokens,
             dst_scale);
@@ -826,31 +817,11 @@ void invokeMoeReduce(T*           dst,
     }
 }
 
-template void invokeMoeReduce(half*,
-                              const half*,
-                              const float*,
-                              const float,
-                              const int*,
-                              const float*,
-                              const float,
-                              int,
-                              int,
-                              int,
-                              float,
-                              cudaStream_t);
+template void
+invokeMoeReduce(half*, const half*, const float*, const int*, const float*, int, int, int, float, cudaStream_t);
 #ifdef ENABLE_BF16
-template void invokeMoeReduce(nv_bfloat16*,
-                              const nv_bfloat16*,
-                              const float*,
-                              const float,
-                              const int*,
-                              const float*,
-                              const float,
-                              int,
-                              int,
-                              int,
-                              float,
-                              cudaStream_t);
+template void invokeMoeReduce(
+    nv_bfloat16*, const nv_bfloat16*, const float*, const int*, const float*, int, int, int, float, cudaStream_t);
 #endif
 
 std::vector<int> SampleUniform(int token_num, int expert_num, int exp_per_tok, std::mt19937& g)
