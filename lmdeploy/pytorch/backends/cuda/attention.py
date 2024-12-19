@@ -41,6 +41,7 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         alibi: bool = False,
         sliding_window: int = None,
         logit_softcapping: float = None,
+        causal: bool = True,
         **kwargs,
     ):
         super().__init__(
@@ -52,8 +53,10 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             alibi=alibi,
             sliding_window=sliding_window,
             logit_softcapping=logit_softcapping,
+            causal=causal,
             **kwargs,
         )
+        assert not (alibi and not causal)
 
         from lmdeploy.pytorch.kernels.cuda import (alibi_paged_attention_fwd,
                                                    fill_kv_cache,
@@ -94,7 +97,10 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
         kv_seqlens = attn_metadata.kv_seqlens
         kv_flatten_size = attn_metadata.kv_flatten_size
         quant_policy = attn_metadata.quant_policy
-        max_q_seqlen = query.numel() // (query.size(-1) * query.size(-2))
+        if attn_metadata.is_decoding:
+            max_q_seqlen = 1
+        else:
+            max_q_seqlen = query.numel() // (query.size(-1) * query.size(-2))
         fill_max_q_seqlen = max_q_seqlen
         if attn_metadata.fill_seqlens is not None:
             fill_seqlens = attn_metadata.fill_seqlens
@@ -169,6 +175,7 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
                     window_size=self.sliding_window,
                     sm_scale=self.scale,
                     logit_softcapping=self.logit_softcapping,
+                    causal=self.causal,
                 )
         else:
             self.alibi_paged_attention_fwd(
@@ -204,6 +211,7 @@ class TritonAttentionBuilder(AttentionBuilder[TritonAttentionMetadata]):
         alibi: bool = False,
         sliding_window: int = None,
         logical_softcapping: float = None,
+        causal: bool = True,
         **kwargs,
     ) -> TritonAttentionImpl:
         """build."""
@@ -215,4 +223,5 @@ class TritonAttentionBuilder(AttentionBuilder[TritonAttentionMetadata]):
                                    alibi=alibi,
                                    sliding_window=sliding_window,
                                    logical_softcapping=logical_softcapping,
+                                   causal=causal,
                                    **kwargs)

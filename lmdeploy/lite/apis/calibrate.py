@@ -26,6 +26,8 @@ LAYER_TYPE_MAP = {
     'Phi3ForCausalLM': 'Phi3DecoderLayer',
     'ChatGLMForConditionalGeneration': 'GLMBlock',
     'MixtralForCausalLM': 'MixtralDecoderLayer',
+    'Qwen2VLForConditionalGeneration': 'Qwen2VLDecoderLayer',
+    'MistralForCausalLM': 'MistralDecoderLayer',
 }
 
 NORM_TYPE_MAP = {
@@ -42,6 +44,8 @@ NORM_TYPE_MAP = {
     'Phi3ForCausalLM': 'Phi3RMSNorm',
     'ChatGLMForConditionalGeneration': 'RMSNorm',
     'MixtralForCausalLM': 'MixtralRMSNorm',
+    'Qwen2VLForConditionalGeneration': 'Qwen2RMSNorm',
+    'MistralForCausalLM': 'MistralRMSNorm',
 }
 
 HEAD_NAME_MAP = {
@@ -58,6 +62,8 @@ HEAD_NAME_MAP = {
     'Phi3ForCausalLM': 'lm_head',
     'ChatGLMForConditionalGeneration': 'output_layer',
     'MixtralForCausalLM': 'lm_head',
+    'Qwen2VLForConditionalGeneration': 'lm_head',
+    'MistralForCausalLM': 'lm_head',
 }
 
 
@@ -233,20 +239,23 @@ def calibrate(model: str,
 
     model_type, _ = get_task(model)
     make_compatible_internvl_config(model)
-    if model_type == 'llm':
-        # Load tokenizer and configuration
-        tokenizer = AutoTokenizer.from_pretrained(model,
-                                                  trust_remote_code=True)
 
-        model = load_hf_from_pretrained(model,
-                                        torch_dtype=torch.float16,
-                                        trust_remote_code=True)
-        vl_model = None
-    elif model_type == 'vlm':
-        from lmdeploy.vl.model.builder import vl_model_with_tokenizer
-        vl_model, model, tokenizer = vl_model_with_tokenizer(model_path=model)
+    # Load tokenizer and configuration
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
 
-    model.config.use_cache = False
+    model = load_hf_from_pretrained(model,
+                                    torch_dtype=torch.float16,
+                                    trust_remote_code=True)
+    vl_model = None
+    if model_type == 'vlm':
+        vl_model = model
+        if hasattr(model, 'language_model'):
+            model = model.language_model
+        if hasattr(model, 'llm'):
+            model = model.llm
+        model.config.use_cache = False
+        model = model.half().eval()
+
     model_type = type(model).__name__
     if model_type not in LAYER_TYPE_MAP or model_type not in NORM_TYPE_MAP:
         raise RuntimeError(

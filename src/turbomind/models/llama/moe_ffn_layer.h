@@ -30,9 +30,6 @@ public:
         FT_CHECK(!param.expert_num.empty());
         const int max_expert_num = *std::max_element(param.expert_num.begin(), param.expert_num.end());
 
-        residual_scale_     = param.residual_scale;
-        fixed_shared_scale_ = param.shared_scale;
-
         if (param_.method == MoeParam::kFused) {
             context_ = std::make_unique<gemm::MoeGemmContext>(
                 max_expert_num, param.experts_per_token, ctx.cuda_device_prop, stream_);
@@ -96,9 +93,6 @@ private:
 
     int* accum_{};
     int* offsets_{};
-
-    float fixed_shared_scale_{};  // manually specify shared expert scale
-    float residual_scale_{};      // residual + hidden_states * residual_scale_
 };
 
 }  // namespace turbomind

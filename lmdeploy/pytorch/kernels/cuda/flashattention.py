@@ -48,8 +48,19 @@ def softcapping(qk, logit_softcapping: tl.constexpr):
 
 
 @triton.jit
+def _load_kv(ptrs, causal_mask: tl.constexpr, boundary_check: tl.constexpr):
+    """load kv."""
+    if causal_mask:
+        return tl.load(ptrs,
+                       boundary_check=boundary_check,
+                       padding_option='zero')
+    else:
+        return tl.load(ptrs)
+
+
+@triton.jit
 def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs,
-                       loop_start, loop_end, qk_scale, history_mask,
+                       loop_start, loop_end, sm_scale, history_mask,
                        kv_min_loc, causal_mask: tl.constexpr,
                        window_size: tl.constexpr,
                        logit_softcapping: tl.constexpr, BLOCK_N: tl.constexpr,
@@ -63,16 +74,17 @@ def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs,
     for start_n in range(loop_start, loop_end, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
-        k = tl.load(k_ptrs)
+        k = _load_kv(k_ptrs, causal_mask, boundary_check=(1, ))
         qk = tl.dot(q, k)
 
         if BLOCK_DK1 != 0:
-            k1 = tl.load(k1_ptrs)
+            k1 = _load_kv(k1_ptrs, causal_mask, boundary_check=(1, ))
             qk += tl.dot(q1, k1)
 
         if causal_mask:
-            qk *= qk_scale
+            qk *= sm_scale
             qk = softcapping(qk, logit_softcapping)
+            qk = qk * tl_log2(math.e)
             qk_mask = (history_mask[:, None]) >= (start_n + offs_n[None, :])
             if window_size > 0:
                 qk_mask = qk_mask and (
@@ -85,8 +97,9 @@ def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs,
             m_i_new = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_i_new[:, None]
         elif window_size > 0:
-            qk *= qk_scale
+            qk *= sm_scale
             qk = softcapping(qk, logit_softcapping)
+            qk = qk * tl_log2(math.e)
             qk_mask = ((start_n + offs_n[None, :]) >= kv_min_loc[:, None])
             qk = tl.where(
                 qk_mask,
@@ -96,11 +109,13 @@ def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs,
             m_i_new = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_i_new[:, None]
         elif logit_softcapping > 0:
-            qk *= qk_scale
+            qk *= sm_scale
             qk = softcapping(qk, logit_softcapping)
+            qk = qk * tl_log2(math.e)
             m_i_new = tl.maximum(m_i, tl.max(qk, 1))
             qk -= m_i_new[:, None]
         else:
+            qk_scale = sm_scale * tl_log2(math.e)
             m_i_new = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
             qk = qk * qk_scale - m_i_new[:, None]
 
@@ -113,7 +128,7 @@ def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs,
         acc = acc * alpha[:, None]
 
         # update acc
-        v = tl.load(v_ptrs)
+        v = _load_kv(v_ptrs, causal_mask, boundary_check=(0, ))
         p = p.to(v.dtype)
         acc += tl.dot(p, v)
         # update m_i and l_i
@@ -168,6 +183,7 @@ def _flash_prefill_fwd_kernel(
     kv_group_num,
     head_dim_k,
     head_dim_v,
+    causal: tl.constexpr,
     window_size: tl.constexpr,
     logit_softcapping: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -256,10 +272,13 @@ def _flash_prefill_fwd_kernel(
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
     acc = tl.zeros([BLOCK_M, BLOCK_DV], dtype=tl.float32)
 
-    qk_scale = sm_scale * tl_log2(math.e)
-    history_mask = history_len + start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    if causal:
+        history_mask = history_len + start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        loop_end = (history_len + start_m * BLOCK_M) // BLOCK_N * BLOCK_N
+    else:
+        history_mask = tl.full([BLOCK_M], kv_seqlen - 1, dtype=tl.int32)
+        loop_end = kv_seqlen // BLOCK_N * BLOCK_N
 
-    loop_end = (history_len + start_m * BLOCK_M) // BLOCK_N * BLOCK_N
     acc, l_i, m_i = _prefill_fwd_inner(acc,
                                        l_i,
                                        m_i,
@@ -270,7 +289,7 @@ def _flash_prefill_fwd_kernel(
                                        k1_ptrs,
                                        loop_start,
                                        loop_end,
-                                       qk_scale,
+                                       sm_scale,
                                        history_mask,
                                        kv_min_loc,
                                        causal_mask=False,
@@ -280,7 +299,10 @@ def _flash_prefill_fwd_kernel(
                                        BLOCK_DK1=BLOCK_DK1)
 
     loop_start = loop_end
-    loop_end = tl.minimum(kv_seqlen, loop_start + BLOCK_M + BLOCK_N)
+    if causal:
+        loop_end = tl.minimum(kv_seqlen, loop_start + BLOCK_M + BLOCK_N)
+    else:
+        loop_end = kv_seqlen
     acc, l_i, m_i = _prefill_fwd_inner(acc,
                                        l_i,
                                        m_i,
@@ -291,7 +313,7 @@ def _flash_prefill_fwd_kernel(
                                        k1_ptrs,
                                        loop_start,
                                        loop_end,
-                                       qk_scale,
+                                       sm_scale,
                                        history_mask,
                                        kv_min_loc,
                                        causal_mask=True,
@@ -330,6 +352,7 @@ def flash_attention_fwd(
     window_size: int = None,
     sm_scale: float = None,
     logit_softcapping: float = None,
+    causal: bool = True,
     kv_layout: str = 'hsd',
 ):
     """varlen flash Attention forward.
@@ -380,6 +403,7 @@ def flash_attention_fwd(
         BLOCK_M = max(16, 8192 // BLOCK_DK)
     else:
         BLOCK_M = max(16, 16384 // BLOCK_DK)
+    BLOCK_M = min(128, BLOCK_M)
     num_warps = 4
     num_stages = min(4, max(2, 1024 // BLOCK_DK))
     if BLOCK_DK >= 512:
@@ -413,6 +437,7 @@ def flash_attention_fwd(
         kv_group_num=kv_group_num,
         head_dim_k=head_dim_k,
         head_dim_v=head_dim_v,
+        causal=causal,
         window_size=window_size,
         logit_softcapping=logit_softcapping,
         BLOCK_DK=BLOCK_DK,

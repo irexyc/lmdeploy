@@ -191,7 +191,7 @@ class Attn(Module):
         self.attn_bias = model.model_config.attn_bias
 
     def _reorder_and_merge(self, qkvo):
-        q, k, v, o = map(transpose, qkvo)
+        q, k, v, o = qkvo
         # reorder output dim for tm's rotary embedding layout
         if self.model.permute_qk:
             q = permute_v2(q, self.head_dim)
@@ -209,8 +209,9 @@ class Attn(Module):
 
         def _repeat(x):
             dim = hidden_dim if kind != 'bias' else 1
-            x = x.view(-1, head_dim, dim).repeat(1, self.model.repeat_kv, 1)
-            x = x.reshape(-1, dim)
+            x = x.reshape(dim, -1, head_dim)
+            x = x.repeat(1, 1, self.model.repeat_kv)
+            x = x.reshape(dim, -1)
             return x
 
         k, v = map(_repeat, (k, v))
@@ -228,7 +229,8 @@ class Attn(Module):
         if is_lora_a:
             qkv, o = map(transpose, qkvo)
         else:
-            if self.model.repeat_kv > 0:
+            qkvo = tuple(map(transpose, qkvo))
+            if self.model.repeat_kv:
                 qkvo = self._repeat_kv(qkvo, kind)
             qkv, o = self._reorder_and_merge(qkvo)
         self.model.save_split(pack_fn(qkv),
