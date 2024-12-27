@@ -18,8 +18,9 @@ class InternLM3MoeReader(LlamaReader):
             tensor = self.transform(tensor, kind)
             result.append(tensor)
 
-        residual_scale_factor = float(self.model_cfg['residual_scale_factor'])
-        result[1] *= residual_scale_factor
+        if kind in ['weight', 'scales']:
+            hidden_factor = float(self.model_cfg['hidden_factor'])
+            result[1] *= hidden_factor
         return (*result, )
 
     def moe_ffn_gate(self, i):

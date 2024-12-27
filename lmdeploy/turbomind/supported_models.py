@@ -14,6 +14,7 @@ SUPPORTED_ARCHS = dict(
     # internlm2
     InternLM2ForCausalLM='internlm2',
     # internlm3
+    InternLM3ForCausalLM='llama',
     InternLM3MoEForCausalLM='internlm3-moe',
     # llama, llama2, alpaca, vicuna, codellama, ultracm, yi,
     # deepseek-coder, deepseek-llm

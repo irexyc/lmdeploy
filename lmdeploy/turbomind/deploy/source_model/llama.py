@@ -166,7 +166,8 @@ class LlamaModel(BaseInputModel):
             if isinstance(rope_scaling, dict):
                 llama2_scaling_type = rope_scaling.get('type', '')
                 llama3_scaling_type = rope_scaling.get('rope_type', '')
-                if llama2_scaling_type and llama3_scaling_type:
+                if llama2_scaling_type and llama3_scaling_type \
+                        and llama2_scaling_type != llama3_scaling_type:
                     raise ValueError(
                         f'Ambiguous rope_scaling in config: {model_arg}')
                 scaling_type = llama2_scaling_type if llama2_scaling_type \
