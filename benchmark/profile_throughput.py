@@ -109,22 +109,37 @@ class Engine:
             prev_len = 0
             token_ids = input_ids.copy()
 
-            generator = model_inst.async_stream_infer(
-                session_id,
-                input_ids=input_ids,
-                gen_config=GenerationConfig(max_new_tokens=output_seqlen,
-                                            temperature=temperature,
-                                            top_p=top_p,
-                                            top_k=top_k,
-                                            ignore_eos=True),
-                sequence_start=True,
-                sequence_end=True,
-                stream_output=stream_output)
+            # generator = model_inst.async_stream_infer(
+            #     session_id,
+            #     input_ids=input_ids,
+            #     gen_config=GenerationConfig(max_new_tokens=output_seqlen,
+            #                                 temperature=temperature,
+            #                                 top_p=top_p,
+            #                                 top_k=top_k,
+            #                                 ignore_eos=True),
+            #     sequence_start=True,
+            #     sequence_end=True,
+            #     stream_output=stream_output)
+
+            async def dummy_generator(gen_config: GenerationConfig):
+                for _ in range(gen_config.max_new_tokens):
+                    yield _
+                    await asyncio.sleep(0)
+
+            gen_config=GenerationConfig(max_new_tokens=output_seqlen,
+                                        temperature=temperature,
+                                        top_p=top_p,
+                                        top_k=top_k,
+                                        ignore_eos=True)
+            generator = dummy_generator(gen_config)
+
             try:
                 async for outputs in generator:
-                    n_token = outputs.num_token
+                    # n_token = outputs.num_token
+                    n_token = outputs + 1
                     if n_token > prev_len:
-                        token_ids += outputs.token_ids[prev_len - n_token:]
+                        # token_ids += outputs.token_ids[prev_len - n_token:]
+                        token_ids += [0]
                         if not skip_detokenize:
                             _, state = self.tokenizer.detokenize_incrementally(
                                 token_ids, state)
