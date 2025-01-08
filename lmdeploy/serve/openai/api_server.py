@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
 import copy
+import multiprocessing as mp
 import os
 import time
 from functools import partial
@@ -29,13 +30,14 @@ from lmdeploy.serve.openai.protocol import (  # noqa: E501
     GenerateResponse, LogProbs, ModelCard, ModelList, ModelPermission,
     ToolCall, TopLogprob, UsageInfo)
 from lmdeploy.tokenizer import DetokenizeState, Tokenizer
-from lmdeploy.utils import get_logger
+from lmdeploy.utils import ProcessArgs, Processor, ReqInput, get_logger
 
 logger = get_logger('lmdeploy')
 
 
 class VariableInterface:
     """A IO interface maintaining variables."""
+    processor: Processor = None
     async_engine: AsyncEngine = None
     session_id: int = 0
     api_keys: Optional[List[str]] = None
@@ -82,10 +84,11 @@ def get_model_list():
     If it is a slora serving. The model list would be [model_name,
     adapter_name1, adapter_name2, ...]
     """
-    model_names = [VariableInterface.async_engine.model_name]
-    cfg = VariableInterface.async_engine.backend_config
-    model_names += getattr(cfg, 'adapters', None) or []
-    return model_names
+    # model_names = [VariableInterface.async_engine.model_name]
+    # cfg = VariableInterface.async_engine.backend_config
+    # model_names += getattr(cfg, 'adapters', None) or []
+    # return model_names
+    return ['Any']
 
 
 @router.get('/v1/models', dependencies=[Depends(check_api_key)])
@@ -118,10 +121,10 @@ def create_error_response(status: HTTPStatus,
 
 async def check_request(request) -> Optional[JSONResponse]:
     """Check if a request is valid."""
-    if hasattr(request, 'model') and request.model not in get_model_list():
-        return create_error_response(
-            HTTPStatus.NOT_FOUND,
-            f'The model `{request.model}` does not exist.')
+    # if hasattr(request, 'model') and request.model not in get_model_list():
+    #     return create_error_response(
+    #         HTTPStatus.NOT_FOUND,
+    #         f'The model `{request.model}` does not exist.')
     if hasattr(request, 'n') and request.n <= 0:
         return create_error_response(
             HTTPStatus.BAD_REQUEST,
@@ -596,16 +599,16 @@ async def completions_v1(request: CompletionRequest,
     error_check_ret = await check_request(request)
     if error_check_ret is not None:
         return error_check_ret
-    if VariableInterface.async_engine.id2step.get(str(request.session_id),
-                                                  0) != 0:
-        return create_error_response(
-            HTTPStatus.BAD_REQUEST,
-            f'The session_id `{request.session_id}` is occupied.')
+    # if VariableInterface.async_engine.id2step.get(str(request.session_id),
+    #                                               0) != 0:
+    #     return create_error_response(
+    #         HTTPStatus.BAD_REQUEST,
+    #         f'The session_id `{request.session_id}` is occupied.')
 
     model_name = request.model
     adapter_name = None
-    if model_name != VariableInterface.async_engine.model_name:
-        adapter_name = model_name  # got a adapter name
+    # if model_name != VariableInterface.async_engine.model_name:
+    #     adapter_name = model_name  # got a adapter name
     request_id = str(request.session_id)
     created_time = int(time.time())
     if isinstance(request.prompt, str):
@@ -628,15 +631,19 @@ async def completions_v1(request: CompletionRequest,
         random_seed=random_seed)
     generators = []
     for i in range(len(request.prompt)):
-        result_generator = VariableInterface.async_engine.generate(
-            request.prompt[i],
-            request.session_id + i,
-            gen_config=gen_config,
-            stream_response=True,  # always use stream to enable batching
-            sequence_start=True,
-            sequence_end=True,
-            do_preprocess=False,
-            adapter_name=adapter_name)
+        # result_generator = VariableInterface.async_engine.generate(
+        #     request.prompt[i],
+        #     request.session_id + i,
+        #     gen_config=gen_config,
+        #     stream_response=True,  # always use stream to enable batching
+        #     sequence_start=True,
+        #     sequence_end=True,
+        #     do_preprocess=False,
+        #     adapter_name=adapter_name)
+        req: ReqInput = ReqInput(request.session_id + i, request.prompt[i],
+                                 gen_config)
+        result_generator = VariableInterface.processor.generate_one_request(
+            req)
         generators.append(result_generator)
 
     def create_stream_response_json(index: int,
@@ -987,6 +994,12 @@ async def startup_event():
         print(f'Service registration failed: {e}')
 
 
+def run_server_process(pipeline_class, **kwargs):
+    logger.setLevel('ERROR')
+    engine = pipeline_class(**kwargs)
+    engine.loop()
+
+
 def serve(model_path: str,
           model_name: Optional[str] = None,
           backend: Literal['turbomind', 'pytorch'] = 'turbomind',
@@ -1005,6 +1018,7 @@ def serve(model_path: str,
           proxy_url: Optional[str] = None,
           max_log_len: int = None,
           disable_fastapi_docs: bool = False,
+          process_args: ProcessArgs = None,
           **kwargs):
     """An example to perform model inference through the command line
     interface.
@@ -1085,14 +1099,42 @@ def serve(model_path: str,
 
     handle_torchrun()
     _, pipeline_class = get_task(model_path)
-    VariableInterface.async_engine = pipeline_class(
-        model_path=model_path,
-        model_name=model_name,
-        backend=backend,
-        backend_config=backend_config,
-        chat_template_config=chat_template_config,
-        max_log_len=max_log_len,
-        **kwargs)
+
+    process_args: ProcessArgs = ProcessArgs.init_new()
+    spawn_context = mp.get_context('spawn')
+    server_proc = spawn_context.Process(
+        target=run_server_process,
+        args=(pipeline_class, ),
+        kwargs=dict(model_path=model_path,
+                    model_name=model_name,
+                    backend=backend,
+                    backend_config=backend_config,
+                    chat_template_config=chat_template_config,
+                    max_log_len=max_log_len,
+                    process_args=process_args,
+                    **kwargs))
+
+    # server_proc = run_server_process(pipeline_class,
+    #                                  model_path=model_path,
+    #                                  model_name=model_name,
+    #                                  backend=backend,
+    #                                  backend_config=backend_config,
+    #                                  chat_template_config=chat_template_config,
+    #                                  max_log_len=max_log_len,
+    #                                  process_args=process_args,
+    #                                  **kwargs)
+    server_proc.start()
+
+    VariableInterface.processor = Processor(process_args)
+
+    # VariableInterface.async_engine = pipeline_class(
+    # model_path=model_path,
+    # model_name=model_name,
+    # backend=backend,
+    # backend_config=backend_config,
+    # chat_template_config=chat_template_config,
+    # max_log_len=max_log_len,
+    #     **kwargs)
 
     if proxy_url is not None:
         VariableInterface.proxy_url = proxy_url

@@ -16,6 +16,7 @@ from typing import (Any, AsyncIterator, Dict, Iterator, List, Literal,
                     Optional, Tuple, Union)
 
 import tqdm
+import zmq.asyncio
 
 from lmdeploy.logger import RequestLogger
 from lmdeploy.messages import (GenerationConfig, PytorchEngineConfig, Response,
@@ -23,7 +24,9 @@ from lmdeploy.messages import (GenerationConfig, PytorchEngineConfig, Response,
 from lmdeploy.model import MODELS, ChatTemplateConfig, best_match_model
 from lmdeploy.serve.utils import LogitsMixin
 from lmdeploy.tokenizer import DetokenizeState
-from lmdeploy.utils import _get_and_verify_max_len, _stop_words, get_logger
+from lmdeploy.utils import (EngineOutput, ProcessArgs, ReqInput,
+                            _get_and_verify_max_len, _stop_words, get_logger,
+                            get_zmq_socket)
 
 logger = get_logger('lmdeploy')
 
@@ -228,6 +231,7 @@ class AsyncEngine(LogitsMixin):
                                                 PytorchEngineConfig]] = None,
                  chat_template_config: Optional[ChatTemplateConfig] = None,
                  max_log_len: int = None,
+                 process_args: ProcessArgs = None,
                  **kwargs) -> None:
         logger.info(
             f'input backend={backend}, backend_config={backend_config}')
@@ -277,6 +281,13 @@ class AsyncEngine(LogitsMixin):
         self.request_logger = RequestLogger(max_log_len)
         self.internal_thread = _EventLoopThread()
         self.limiter: asyncio.Semaphore = None
+
+        context = zmq.asyncio.Context(2)
+        self.recv_from_processor = get_zmq_socket(context, zmq.PULL,
+                                                  process_args.engine_name)
+        self.send_to_processor = get_zmq_socket(context, zmq.PUSH,
+                                                process_args.processor_name)
+        self.que = asyncio.Queue()
 
     def close(self):
         self.internal_thread.close()
@@ -345,6 +356,21 @@ class AsyncEngine(LogitsMixin):
                                 adapter_name=adapter_name,
                                 use_tqdm=use_tqdm,
                                 **kwargs)
+
+    async def process_req(self, req: ReqInput):
+        await self.generate(req.prompt,
+                            req.session_id,
+                            gen_config=req.gen_config)
+
+    async def handle_req(self):
+        loop = asyncio.get_event_loop()
+        while True:
+            req: ReqInput = await self.recv_from_processor.recv_pyobj()
+            _ = loop.create_task(self.process_req(req))
+
+    def loop(self):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(self.handle_req())
 
     async def stop_session(self, session_id: int):
         """Stop a session by a session_id."""
@@ -574,9 +600,17 @@ class AsyncEngine(LogitsMixin):
             inst._active.set()
             free_insts.put_nowait(inst)
 
+    async def dummy_generator(self,
+                              gen_config: GenerationConfig = None,
+                              **kwargs):
+        for _ in range(gen_config.max_new_tokens):
+            yield _
+            await asyncio.sleep(0)
+
     @asynccontextmanager
     async def safe_run(self, inst, session_id, **kwargs):
-        generator = inst.async_stream_infer(session_id, **kwargs)
+        # generator = inst.async_stream_infer(session_id, **kwargs)
+        generator = self.dummy_generator(**kwargs)
         try:
             yield generator
         except (Exception, asyncio.CancelledError, GeneratorExit) as e:  # noqa
@@ -680,8 +714,10 @@ class AsyncEngine(LogitsMixin):
         if self.id2step[session_id] + len(
                 input_ids) + gen_config.max_new_tokens > self.session_len:
             logger.error(f'run out of tokens. session_id={session_id}.')
-            yield GenOut('', self.id2step[session_id], len(input_ids), 0,
-                         'length')
+            await self.send_to_processor.send_pyobj(
+                EngineOutput(session_id, '', finish_reason='length'))
+            # yield GenOut('', self.id2step[session_id], len(input_ids), 0,
+            #              'length')
             if sequence_end is True and sequence_start is False:
                 await self.end_session(session_id)
             return
@@ -695,6 +731,7 @@ class AsyncEngine(LogitsMixin):
             prev_len = 0
             start_ids_offset = state.ids_offset
             response = ''
+            tokens = 0
             async with self.safe_run(inst,
                                      session_id=session_id,
                                      **prompt_input,
@@ -704,53 +741,57 @@ class AsyncEngine(LogitsMixin):
                                      sequence_start=sequence_start,
                                      sequence_end=sequence_end,
                                      step=self.id2step[session_id]) as gen:
-                async for outputs in gen:
-                    # decode res
-                    if is_error(outputs.status):
-                        tokens = 0
-                        break
-                    tokens = outputs.num_token
-                    token_ids += outputs.token_ids[prev_len - tokens:]
-                    prev_len = tokens
+                async for _ in gen:
+                    await self.send_to_processor.send_pyobj(
+                        EngineOutput(session_id, ''))
+                await self.send_to_processor.send_pyobj(
+                    EngineOutput(session_id, '', finish_reason='length'))
+                #     # decode res
+                #     if is_error(outputs.status):
+                #         tokens = 0
+                #         break
+                #     tokens = outputs.num_token
+                #     token_ids += outputs.token_ids[prev_len - tokens:]
+                #     prev_len = tokens
 
-                    if len(token_ids) <= state.ids_offset:
-                        continue
+                #     if len(token_ids) <= state.ids_offset:
+                #         continue
 
-                    ids_offset = state.ids_offset
-                    response, state = self.tokenizer.detokenize_incrementally(
-                        token_ids,
-                        state,
-                        skip_special_tokens=gen_config.skip_special_tokens)
-                    res = token_ids[ids_offset:]
+                #     ids_offset = state.ids_offset
+                #     response, state = self.tokenizer.detokenize_incrementally(
+                #         token_ids,
+                #         state,
+                #         skip_special_tokens=gen_config.skip_special_tokens)
+                #     res = token_ids[ids_offset:]
 
-                    logprobs = None
-                    if outputs.logprobs:
-                        log_offset = ids_offset - start_ids_offset
-                        logprobs = outputs.logprobs[log_offset:]
+                #     logprobs = None
+                #     if outputs.logprobs:
+                #         log_offset = ids_offset - start_ids_offset
+                #         logprobs = outputs.logprobs[log_offset:]
 
-                    # response, history token len,
-                    # input token len, gen token len
-                    yield GenOut(response, self.id2step[session_id],
-                                 len(input_ids), tokens, finish_reason, res,
-                                 logprobs)
-                    # end of generator loop
-                if not is_error(outputs.status):
-                    finish_reason = 'length' \
-                        if tokens >= gen_config.max_new_tokens else 'stop'
-                    # utf-8 char at the end means it's a potential unfinished
-                    # byte sequence
-                    if not response.endswith('�'):
-                        # avaid returning the last response twice
-                        response = ''
-                    yield GenOut(response, self.id2step[session_id],
-                                 len(input_ids), tokens, finish_reason)
-                else:
-                    yield GenOut(response='internal error happened',
-                                 history_token_len=self.id2step[session_id],
-                                 input_token_len=len(input_ids),
-                                 generate_token_len=0,
-                                 finish_reason='error',
-                                 token_ids=[])
+                #     # response, history token len,
+                #     # input token len, gen token len
+                #     yield GenOut(response, self.id2step[session_id],
+                #                  len(input_ids), tokens, finish_reason, res,
+                #                  logprobs)
+                #     # end of generator loop
+                # if not is_error(outputs.status):
+                #     finish_reason = 'length' \
+                #         if tokens >= gen_config.max_new_tokens else 'stop'
+                #     # utf-8 char at the end means it's a potential unfinished
+                #     # byte sequence
+                #     if not response.endswith('�'):
+                #         # avaid returning the last response twice
+                #         response = ''
+                #     yield GenOut(response, self.id2step[session_id],
+                #                  len(input_ids), tokens, finish_reason)
+                # else:
+                #     yield GenOut(response='internal error happened',
+                #                  history_token_len=self.id2step[session_id],
+                #                  input_token_len=len(input_ids),
+                #                  generate_token_len=0,
+                #                  finish_reason='error',
+                #                  token_ids=[])
             # update step
             if sequence_end:
                 self.id2step[session_id] = 0

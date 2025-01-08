@@ -3,11 +3,15 @@ import asyncio
 import functools
 import logging
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from logging import Logger, LogRecord
 from typing import List, Optional, TypeVar, Union
 
+import zmq
+import zmq.asyncio
 from transformers import PretrainedConfig
 
 logger_initialized = {}
@@ -389,3 +393,106 @@ def is_bf16_supported(device_type: str = 'cuda'):
         return True
     else:
         return False
+
+
+@dataclass
+class ReqInput:
+    session_id: int
+    prompt: str
+    gen_config: 'GenerationConfig'
+
+
+@dataclass
+class ProcessArgs:
+    """ipc args."""
+
+    processor_name: str
+    engine_name: str
+
+    @staticmethod
+    def init_new():
+        return ProcessArgs(
+            processor_name=tempfile.NamedTemporaryFile(delete=False).name,
+            engine_name=tempfile.NamedTemporaryFile(delete=False).name)
+
+
+@dataclass
+class EngineOutput:
+    session_id: int
+    response: str
+    history_token_len: int = 0
+    input_token_len: int = 0
+    generate_token_len: int = 0
+    finish_reason: str = None
+    token_ids: List[int] = None
+    logprobs: List[dict[int, float]] = None
+
+
+@dataclass
+class ReqOutput:
+    result: EngineOutput
+    event: asyncio.Event
+
+
+def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType,
+                   endpoint: str):
+    socket = context.socket(socket_type)
+    if socket_type == zmq.PUSH:
+        socket.setsockopt(zmq.SNDHWM, 0)
+        socket.setsockopt(zmq.SNDBUF, int(0.5 * 1024**3))
+        socket.connect(f'ipc://{endpoint}')
+    elif socket_type == zmq.PULL:
+        socket.setsockopt(zmq.RCVHWM, 0)
+        socket.setsockopt(zmq.RCVBUF, int(0.5 * 1024**3))
+        socket.bind(f'ipc://{endpoint}')
+    else:
+        raise ValueError(f'Unsupported socket type: {socket_type}')
+    return socket
+
+
+class Processor:
+
+    def __init__(self, process_args: ProcessArgs):
+        context = zmq.asyncio.Context(2)
+        self.recv_from_engine = get_zmq_socket(context, zmq.PULL,
+                                               process_args.processor_name)
+        self.send_to_engine = get_zmq_socket(context, zmq.PUSH,
+                                             process_args.engine_name)
+        self.state: dict[int, ReqOutput] = {}
+
+    async def generate_one_request(self, req: ReqInput):
+        self._send_one_request(req)
+        async for response in self._wait_one_response(req):
+            yield response
+
+    def _send_one_request(self, req: ReqInput):
+        event = asyncio.Event()
+        self.state[req.session_id] = ReqOutput(None, event)
+        self.send_to_engine.send_pyobj(req)
+
+    async def _wait_one_response(self, req: ReqInput):
+        self.create_handle_loop()
+        while True:
+            state = self.state[req.session_id]
+            await state.event.wait()
+            res = state.result
+            if res.finish_reason:
+                del self.state[req.session_id]
+                yield res
+                break
+            state.event.clear()
+            yield res
+
+    def create_handle_loop(self):
+        if hasattr(self, '_loop'):
+            return
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.handle_loop())
+        self._loop = True
+
+    async def handle_loop(self):
+        while True:
+            res: EngineOutput = await self.recv_from_engine.recv_pyobj()
+            state = self.state[res.session_id]
+            state.result = res
+            state.event.set()

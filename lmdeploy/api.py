@@ -5,6 +5,7 @@ from typing import List, Literal, Optional, Union
 from .archs import autoget_backend_config, get_task
 from .messages import PytorchEngineConfig, TurbomindEngineConfig
 from .model import ChatTemplateConfig
+from .utils import ProcessArgs
 
 
 def pipeline(model_path: str,
