@@ -304,8 +304,8 @@ class Xcomposer2VisionModel(VisonModel):
                     if n_images == 1:
                         prefix_image_token, prompt = IMAGE_TOKEN, content[0]
                     else:
-                        prompt = '; '.join([
-                            f'Image{i+1} {IMAGE_TOKEN}'
+                        prompt = ''.join([
+                            f'Image{i+1} {IMAGE_TOKEN}; '
                             for i in range(n_images)
                         ]) + content[0]
                 else:
