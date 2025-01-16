@@ -282,10 +282,11 @@ class Xcomposer2VisionModel(VisonModel):
         return messages
 
     @staticmethod
-    def proc_messages(messages, chat_template, sequence_start):
+    def proc_messages(messages, chat_template, sequence_start, model_type):
         """apply chat template to get the prompt."""
         prompt_messages = []
         IMAGE_TOKEN = '<IMAGE_TOKEN>'
+        prefix_image_token = ''
         for message in messages:
             if isinstance(message['content'], str):
                 prompt_messages.append(message)
@@ -299,21 +300,33 @@ class Xcomposer2VisionModel(VisonModel):
                 if item['type'] == 'text'
             ]
             if IMAGE_TOKEN not in content[0]:
-                prompt = ' '.join([IMAGE_TOKEN] * n_images) + content[0]
+                if model_type == ModelType.XCOMPOSER2D5:
+                    if n_images == 1:
+                        prefix_image_token, prompt = IMAGE_TOKEN, content[0]
+                    else:
+                        prompt = '; '.join([
+                            f'Image{i+1} {IMAGE_TOKEN}'
+                            for i in range(n_images)
+                        ]) + content[0]
+                else:
+                    prompt = ''.join([IMAGE_TOKEN] * n_images) + content[0]
             else:
                 prompt = content[0]
             prompt_messages.append(dict(role='user', content=prompt))
-        prompt = chat_template.messages2prompt(prompt_messages, sequence_start)
+        prompt = prefix_image_token + chat_template.messages2prompt(
+            prompt_messages, sequence_start)
         return prompt, IMAGE_TOKEN
 
     def to_pytorch(self, messages, chat_template, tokenizer, sequence_start):
         prompt, IMAGE_TOKEN = self.proc_messages(messages, chat_template,
-                                                 sequence_start)
+                                                 sequence_start,
+                                                 self.model_type)
         return self.to_pytorch_aux(messages, prompt, IMAGE_TOKEN, tokenizer,
                                    sequence_start)
 
     def to_turbomind(self, messages, chat_template, tokenizer, sequence_start):
         prompt, IMAGE_TOKEN = self.proc_messages(messages, chat_template,
-                                                 sequence_start)
+                                                 sequence_start,
+                                                 self.model_type)
         return self.to_turbomind_aux(messages, prompt, IMAGE_TOKEN, tokenizer,
                                      sequence_start)
