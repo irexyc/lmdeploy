@@ -204,6 +204,7 @@ class Xcomposer2VisionModel(VisonModel):
         image = self.HD_transform(image, hd_num=hd_num)
         pixel_values = self.vis_processor(image).unsqueeze(0).half()
         w, h = image.size
+        w, h = w // 560, h // 560
         n_token_per_image = int((h * w + 1) * 400 + 1 + (h + 1) * 20)
         return pixel_values, n_token_per_image
 
@@ -217,6 +218,7 @@ class Xcomposer2VisionModel(VisonModel):
         image = self.HD_transform(image, hd_num=25)
         pixel_values = self.vis_processor(image).unsqueeze(0).half()
         w, h = image.size
+        w, h = w // 336, h // 336
         n_token_per_image = int((h * w + 1) * 144 + 1 + (h + 1) * 12)
         return pixel_values, n_token_per_image
 
@@ -296,7 +298,10 @@ class Xcomposer2VisionModel(VisonModel):
                 item['text'] for item in message['content']
                 if item['type'] == 'text'
             ]
-            prompt = ' '.join([IMAGE_TOKEN] * n_images) + content[0]
+            if IMAGE_TOKEN not in content[0]:
+                prompt = ' '.join([IMAGE_TOKEN] * n_images) + content[0]
+            else:
+                prompt = content[0]
             prompt_messages.append(dict(role='user', content=prompt))
         prompt = chat_template.messages2prompt(prompt_messages, sequence_start)
         return prompt, IMAGE_TOKEN
