@@ -1095,6 +1095,13 @@ async def startup_event():
         logger.error(f'Service registration failed: {e}')
 
 
+@router.on_event('shutdown')
+async def shutdown_event():
+    async_engine = VariableInterface.async_engine
+    if async_engine is not None:
+        async_engine.close()
+
+
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handler for RequestValidationError."""
     return JSONResponse(
