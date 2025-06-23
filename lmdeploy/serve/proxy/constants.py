@@ -14,6 +14,9 @@ if AIOHTTP_TIMEOUT is not None:
 logger.info(f'AIOHTTP_TIMEOUT set to {AIOHTTP_TIMEOUT}. It can be modified before launching the proxy server '
             'through env variable AIOHTTP_TIMEOUT')
 
+lmdeploy_proxy_sock_read = int(os.getenv('LMDEPLOY_PROXY_SOCK_READ', 30))
+lmdeploy_proxy_enable_retry = int(os.getenv('LMDEPLOY_PROXY_ENABLE_RETRY', 0))  # enable non streaming retry
+
 
 class RoutingStrategy(enum.Enum):
     """Strategy to dispatch requests to nodes."""

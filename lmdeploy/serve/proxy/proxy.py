@@ -8,7 +8,7 @@ import os.path as osp
 import random
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from http import HTTPStatus
 from typing import Deque, Dict, List, Literal, Optional, Union
 
@@ -28,8 +28,12 @@ from lmdeploy.pytorch.disagg.messages import PDConnectionMessage
 from lmdeploy.pytorch.disagg.request import MigrationRequest
 from lmdeploy.serve.openai.api_server import check_api_key, create_error_response
 from lmdeploy.serve.openai.protocol import ModelCard  # noqa: E501
-from lmdeploy.serve.openai.protocol import ChatCompletionRequest, CompletionRequest, ModelList, ModelPermission
-from lmdeploy.serve.proxy.constants import AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg
+from lmdeploy.serve.openai.protocol import (ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice,
+                                            ChatCompletionStreamResponse, ChatMessage, CompletionRequest,
+                                            CompletionResponse, CompletionResponseChoice, CompletionStreamResponse,
+                                            ModelList, ModelPermission, UsageInfo)
+from lmdeploy.serve.proxy.constants import (AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg,
+                                            lmdeploy_proxy_enable_retry, lmdeploy_proxy_sock_read)
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -42,6 +46,8 @@ class Status(BaseModel):
     unfinished: int = 0
     latency: Deque = Field(default=deque(maxlen=LATENCY_DEQUE_LEN), examples=[[]])
     speed: Optional[int] = Field(default=None, examples=[None])
+    last_return_time: float = 0
+    last_check_time: float = 0
 
 
 class Node(BaseModel):
@@ -84,6 +90,7 @@ class NodeManager:
                  with_gdr: bool = True,
                  cache_status: Optional[bool] = True) -> None:
         self.nodes = dict()
+        self.locks = defaultdict(asyncio.Lock)
         self.serving_strategy = ServingStrategy[serving_strategy]
         self.routing_strategy = RoutingStrategy.from_str(routing_strategy)
 
@@ -224,7 +231,8 @@ class NodeManager:
                 response = requests.get(url, headers=headers)
                 if response.status_code != 200:
                     to_be_deleted.append(node_url)
-            except:  # noqa
+            except Exception as e:  # noqa
+                logger.error(f'remove_stale_nodes_by_expiration {node_url}, error: {e}')
                 to_be_deleted.append(node_url)
         for node_url in to_be_deleted:
             self.remove(node_url)
@@ -244,6 +252,64 @@ class NodeManager:
     def status(self):
         """Return the status."""
         return self.nodes
+
+    async def check_node(self, node_url: str):
+        lock = self.locks[node_url]
+        status = self.nodes.get(node_url)
+        if status is None:
+            return False
+        async with lock:
+            now = time.time()
+            if now - status.last_return_time < 60:
+                return True
+            if now - status.last_check_time < 60:
+                return False
+
+            # maybe the first request
+            if status.last_return_time == 0:
+                timeout = aiohttp.ClientTimeout(total=30)
+            else:
+                timeout = aiohttp.ClientTimeout(total=5)
+            try:
+                endpoint = '/v1/completions'
+                request = dict(model=status.models[0], prompt='Hi', max_tokens=1, stream=True)
+
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(node_url + endpoint, json=request) as response:
+                        async for _ in response.content:
+                            status.last_return_time = status.last_check_time = time.time()
+                            return True
+            except Exception as e:
+                logger.error(f'check {node_url} failed with {e}')
+                status.last_check_time = time.time()
+                return False
+
+    async def get_valid_node_url(self, model_name: str, role: EngineRole = EngineRole.Hybrid):
+        items = list(self.nodes.items())
+        now = time.time()
+        all_urls, all_status = [], []
+        check_urls, check_status = [], []
+        for node_url, status in items:
+            if model_name in status.models:
+                if now - status.last_return_time < 60:
+                    all_urls.append(node_url)
+                    all_status.append(status)
+                elif now - status.last_check_time >= 60:
+                    check_urls.append(node_url)
+                    check_status.append(status)
+        tasks = [self.check_node(node_url) for node_url in check_urls]
+        success = await asyncio.gather(*tasks)
+        for succ, url, status in zip(success, check_urls, check_status):
+            if succ:
+                all_urls.append(url)
+                all_status.append(status)
+        min_unfinished = float('inf')
+        selected_url = None
+        for url, status in zip(all_urls, all_status):
+            if status.unfinished < min_unfinished:
+                min_unfinished = status.unfinished
+                selected_url = url
+        return selected_url
 
     def get_node_url(self, model_name: str, role: EngineRole = EngineRole.Hybrid):
         """Add a node to the manager.
@@ -343,6 +409,68 @@ class NodeManager:
         }
         return json.dumps(ret).encode() + b'\n'
 
+    async def merge_completions_stream(self, request: Dict, node_url: str, endpoint: str):
+        generated_text = ''
+        aiotimeout = aiohttp.ClientTimeout(sock_read=lmdeploy_proxy_sock_read)
+        status = self.nodes[node_url]
+        async with aiohttp.ClientSession(timeout=aiotimeout) as session:
+            async with session.post(node_url + endpoint, json=request) as response:
+                assert response.status == 200, f'Failed to get response from {node_url + endpoint}'
+                async for chunk_bytes in response.content:
+                    status.last_return_time = time.time()
+                    chunk_bytes = chunk_bytes.strip().decode('utf-8')
+                    if not chunk_bytes:
+                        continue
+                    prefix = 'data: '
+                    chunk = chunk_bytes[len(prefix):] if chunk_bytes.startswith(prefix) else chunk_bytes
+                    if chunk == '[DONE]':
+                        pass
+                    else:
+                        stream_resp = CompletionStreamResponse.model_validate_json(chunk)
+                        generated_text += stream_resp.choices[0].text
+        choice_data = CompletionResponseChoice(
+            index=0,
+            text=generated_text,
+            finish_reason=stream_resp.choices[0].finish_reason,
+        )
+        resp = CompletionResponse(id=stream_resp.id,
+                                  model=stream_resp.model,
+                                  choices=[choice_data],
+                                  usage=stream_resp.usage or UsageInfo())
+        return resp.model_dump_json()
+
+    async def merge_chat_completions_stream(self, request: Dict, node_url: str, endpoint: str):
+        generated_text = ''
+        aiotimeout = aiohttp.ClientTimeout(sock_read=lmdeploy_proxy_sock_read)
+        status = self.nodes[node_url]
+        async with aiohttp.ClientSession(timeout=aiotimeout) as session:
+            async with session.post(node_url + endpoint, json=request) as response:
+                assert response.status == 200, f'Failed to get response from {node_url + endpoint}'
+                async for chunk_bytes in response.content:
+                    status.last_return_time = time.time()
+                    chunk_bytes = chunk_bytes.strip().decode('utf-8')
+                    if not chunk_bytes:
+                        continue
+                    prefix = 'data: '
+                    chunk = chunk_bytes[len(prefix):] if chunk_bytes.startswith(prefix) else chunk_bytes
+                    if chunk == '[DONE]':
+                        pass
+                    else:
+                        stream_resp = ChatCompletionStreamResponse.model_validate_json(chunk)
+                        generated_text += stream_resp.choices[0].delta.content
+
+        # TODO: support reasoning and tool call
+        choice_data = ChatCompletionResponseChoice(
+            index=0,
+            message=ChatMessage(role='assistant', content=generated_text),
+            finish_reason=stream_resp.choices[0].finish_reason,
+        )
+        resp = ChatCompletionResponse(id=stream_resp.id,
+                                      model=stream_resp.model,
+                                      choices=[choice_data],
+                                      usage=stream_resp.usage or UsageInfo())
+        return resp.model_dump_json()
+
     async def stream_generate(self,
                               request: Dict,
                               node_url: str,
@@ -386,6 +514,38 @@ class NodeManager:
         except (Exception, GeneratorExit, aiohttp.ClientError, asyncio.CancelledError) as e:  # noqa  # yapf: disable
             logger.error(f'catched an exception: {e}')
             return self.handle_api_timeout(node_url)
+
+    async def generate_with_retry(self, request: Dict, endpoint: str):
+        request['stream'] = True
+        request['stream_options'] = dict(include_usage=True)
+        model = request['model']
+        status = None
+
+        retry = False
+        while True:
+            node_url = await self.get_valid_node_url(model)
+            if status:
+                status.unfinished -= 1
+            if node_url is None:
+                logger.error(f'failed to find available node url for request {id(request)}')
+                return self.handle_api_timeout(node_url)
+            status = self.nodes[node_url]
+            try:
+                key = 'dispatched' if not retry else 'redispatched'
+                logger.info(f'request {id(request)} is {key} to {node_url}')
+                status.unfinished += 1
+                if endpoint == '/v1/chat/completions':
+                    resp = await self.merge_chat_completions_stream(request, node_url, endpoint)
+                elif endpoint == '/v1/completions':
+                    resp = await self.merge_completions_stream(request, node_url, endpoint)
+                status.unfinished -= 1
+                return resp
+            except Exception as e:
+                msg = (f'catched an exception: {e}, '
+                       f'request {id(request)}, node_url: {node_url}, retrying after 5 seconds')
+                logger.info(msg)
+                retry = True
+                await asyncio.sleep(5)
 
     def pre_call(self, node_url):
         """Preprocess before the request get processed.
@@ -583,6 +743,12 @@ async def chat_completions_v1(request: ChatCompletionRequest, raw_request: Reque
         return check_response
 
     if node_manager.serving_strategy == ServingStrategy.Hybrid:
+        if lmdeploy_proxy_enable_retry:
+            assert request.stream is False
+            request_dict = request.model_dump()
+            response = await node_manager.generate_with_retry(request_dict, '/v1/chat/completions')
+            return JSONResponse(json.loads(response))
+
         node_url = node_manager.get_node_url(request.model)
         if not node_url:
             return node_manager.handle_unavailable_model(request.model)
@@ -707,6 +873,12 @@ async def completions_v1(request: CompletionRequest, raw_request: Request = None
     if check_response is not None:
         return check_response
     if node_manager.serving_strategy == ServingStrategy.Hybrid:
+        if lmdeploy_proxy_enable_retry:
+            assert request.stream is False
+            request_dict = request.model_dump()
+            response = await node_manager.generate_with_retry(request_dict, '/v1/completions')
+            return JSONResponse(json.loads(response))
+
         node_url = node_manager.get_node_url(request.model)
         if not node_url:
             return node_manager.handle_unavailable_model(request.model)
