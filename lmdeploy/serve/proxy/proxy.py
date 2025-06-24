@@ -409,7 +409,7 @@ class NodeManager:
         }
         return json.dumps(ret).encode() + b'\n'
 
-    async def merge_completions_stream(self, request: Dict, node_url: str, endpoint: str):
+    async def _merge_completions_stream(self, request: Dict, node_url: str, endpoint: str, consumed, fut):
         generated_text = ''
         aiotimeout = aiohttp.ClientTimeout(sock_read=lmdeploy_proxy_sock_read)
         status = self.nodes[node_url]
@@ -419,6 +419,8 @@ class NodeManager:
                 async for chunk_bytes in response.content:
                     status.last_return_time = time.time()
                     chunk_bytes = chunk_bytes.strip().decode('utf-8')
+                    if not consumed.done():
+                        consumed.set_result(True)
                     if not chunk_bytes:
                         continue
                     prefix = 'data: '
@@ -437,9 +439,10 @@ class NodeManager:
                                   model=stream_resp.model,
                                   choices=[choice_data],
                                   usage=stream_resp.usage or UsageInfo())
-        return resp.model_dump_json()
+        logger.info(f'request {id(request)} usage {resp.usage}')
+        fut.set_result(resp.model_dump_json())
 
-    async def merge_chat_completions_stream(self, request: Dict, node_url: str, endpoint: str):
+    async def _merge_chat_completions_stream(self, request: Dict, node_url: str, endpoint: str, consumed, fut):
         generated_text = ''
         aiotimeout = aiohttp.ClientTimeout(sock_read=lmdeploy_proxy_sock_read)
         status = self.nodes[node_url]
@@ -449,6 +452,8 @@ class NodeManager:
                 async for chunk_bytes in response.content:
                     status.last_return_time = time.time()
                     chunk_bytes = chunk_bytes.strip().decode('utf-8')
+                    if not consumed.done():
+                        consumed.set_result(True)
                     if not chunk_bytes:
                         continue
                     prefix = 'data: '
@@ -469,7 +474,29 @@ class NodeManager:
                                       model=stream_resp.model,
                                       choices=[choice_data],
                                       usage=stream_resp.usage or UsageInfo())
-        return resp.model_dump_json()
+        logger.info(f'request {id(request)} usage {resp.usage}')
+        fut.set_result(resp.model_dump_json())
+
+    async def merge_task_with_monitor(self, request: Dict, node_url: str, endpoint: str):
+        status = self.nodes[node_url]
+        loop = asyncio.get_running_loop()
+        beg = time.time()
+        fut = loop.create_future()
+        consumed = loop.create_future()
+        if endpoint == '/v1/completions':
+            task = asyncio.create_task(self._merge_completions_stream(request, node_url, endpoint, consumed, fut))
+        else:
+            task = asyncio.create_task(self._merge_chat_completions_stream(request, node_url, endpoint, consumed, fut))
+        while not fut.done():
+            await asyncio.sleep(5)
+            now = time.time()
+            if now - beg > 60 and not consumed.done():
+                task.cancel()
+                raise asyncio.TimeoutError('The request has not been consumed.')
+            if now - status.last_return_time > 60:
+                task.cancel()
+                raise asyncio.TimeoutError('Node has not returned data for more than 60 seconds')
+        return fut.result()
 
     async def stream_generate(self,
                               request: Dict,
@@ -534,10 +561,7 @@ class NodeManager:
                 key = 'dispatched' if not retry else 'redispatched'
                 logger.info(f'request {id(request)} is {key} to {node_url}')
                 status.unfinished += 1
-                if endpoint == '/v1/chat/completions':
-                    resp = await self.merge_chat_completions_stream(request, node_url, endpoint)
-                elif endpoint == '/v1/completions':
-                    resp = await self.merge_completions_stream(request, node_url, endpoint)
+                resp = await self.merge_task_with_monitor(request, node_url, endpoint)
                 status.unfinished -= 1
                 return resp
             except Exception as e:
