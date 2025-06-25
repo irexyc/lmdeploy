@@ -33,7 +33,7 @@ from lmdeploy.serve.openai.protocol import (ChatCompletionRequest, ChatCompletio
                                             CompletionResponse, CompletionResponseChoice, CompletionStreamResponse,
                                             ModelList, ModelPermission, UsageInfo)
 from lmdeploy.serve.proxy.constants import (AIOHTTP_TIMEOUT, LATENCY_DEQUE_LEN, ErrorCodes, RoutingStrategy, err_msg,
-                                            lmdeploy_proxy_enable_retry, lmdeploy_proxy_sock_read)
+                                            lmdeploy_proxy_enable_retry, lmdeploy_proxy_retry_interval)
 from lmdeploy.utils import get_logger
 
 logger = get_logger('lmdeploy')
@@ -260,16 +260,12 @@ class NodeManager:
             return False
         async with lock:
             now = time.time()
-            if now - status.last_return_time < 60:
+            if now - status.last_return_time < lmdeploy_proxy_retry_interval:
                 return True
-            if now - status.last_check_time < 60:
+            if now - status.last_check_time < lmdeploy_proxy_retry_interval:
                 return False
 
-            # maybe the first request
-            if status.last_return_time == 0:
-                timeout = aiohttp.ClientTimeout(total=30)
-            else:
-                timeout = aiohttp.ClientTimeout(total=5)
+            timeout = aiohttp.ClientTimeout(total=lmdeploy_proxy_retry_interval)
             try:
                 endpoint = '/v1/completions'
                 request = dict(model=status.models[0], prompt='Hi', max_tokens=1, stream=True)
@@ -291,10 +287,10 @@ class NodeManager:
         check_urls, check_status = [], []
         for node_url, status in items:
             if model_name in status.models:
-                if now - status.last_return_time < 60:
+                if now - status.last_return_time < lmdeploy_proxy_retry_interval:
                     all_urls.append(node_url)
                     all_status.append(status)
-                elif now - status.last_check_time >= 60:
+                elif now - status.last_check_time >= lmdeploy_proxy_retry_interval:
                     check_urls.append(node_url)
                     check_status.append(status)
         tasks = [self.check_node(node_url) for node_url in check_urls]
@@ -411,9 +407,9 @@ class NodeManager:
 
     async def _merge_completions_stream(self, request: Dict, node_url: str, endpoint: str, consumed, fut):
         generated_text = ''
-        aiotimeout = aiohttp.ClientTimeout(sock_read=lmdeploy_proxy_sock_read)
         status = self.nodes[node_url]
-        async with aiohttp.ClientSession(timeout=aiotimeout) as session:
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(node_url + endpoint, json=request) as response:
                 assert response.status == 200, f'Failed to get response from {node_url + endpoint}'
                 async for chunk_bytes in response.content:
@@ -444,9 +440,9 @@ class NodeManager:
 
     async def _merge_chat_completions_stream(self, request: Dict, node_url: str, endpoint: str, consumed, fut):
         generated_text = ''
-        aiotimeout = aiohttp.ClientTimeout(sock_read=lmdeploy_proxy_sock_read)
         status = self.nodes[node_url]
-        async with aiohttp.ClientSession(timeout=aiotimeout) as session:
+        timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(node_url + endpoint, json=request) as response:
                 assert response.status == 200, f'Failed to get response from {node_url + endpoint}'
                 async for chunk_bytes in response.content:
@@ -490,12 +486,13 @@ class NodeManager:
         while not fut.done():
             await asyncio.sleep(5)
             now = time.time()
-            if now - beg > 60 and not consumed.done():
+            if now - beg > lmdeploy_proxy_retry_interval and not consumed.done():
                 task.cancel()
                 raise asyncio.TimeoutError('The request has not been consumed.')
-            if now - status.last_return_time > 60:
+            if now - status.last_return_time > lmdeploy_proxy_retry_interval:
                 task.cancel()
-                raise asyncio.TimeoutError('Node has not returned data for more than 60 seconds')
+                raise asyncio.TimeoutError('Node has not returned data for more than'
+                                           f'{lmdeploy_proxy_retry_interval} seconds')
         return fut.result()
 
     async def stream_generate(self,
