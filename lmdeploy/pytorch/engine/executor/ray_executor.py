@@ -252,6 +252,11 @@ class RayWorkerWrapper(WorkerWrapperBase):
         dtype: str = 'auto',
         log_level: int = 30,
     ):
+        import os
+        if os.getenv('RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES', '0') == '1':
+            logger.warning(f'CUDA_VISIBLE_DEVICES: {os.getenv("CUDA_VISIBLE_DEVICES")}, DP_RANK {dist_config.dp_rank}')
+            self.set_device(dist_config.dp_rank)
+
         init_backend(device_type)
         try_import_deeplink(device_type)
 
