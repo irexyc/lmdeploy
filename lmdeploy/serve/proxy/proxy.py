@@ -407,6 +407,7 @@ class NodeManager:
 
     async def _merge_completions_stream(self, request: Dict, node_url: str, endpoint: str, consumed, fut):
         generated_text = ''
+        output_token_ids: List[int] = []
         status = self.nodes[node_url]
         timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -425,12 +426,16 @@ class NodeManager:
                         pass
                     else:
                         stream_resp = CompletionStreamResponse.model_validate_json(chunk)
-                        generated_text += stream_resp.choices[0].text
+                        choice = stream_resp.choices[0]
+                        generated_text += choice.text
+                        output_token_ids.extend(getattr(choice, 'gen_tokens', []) or [])
+
         choice_data = CompletionResponseChoice(
             index=0,
             text=generated_text,
             finish_reason=stream_resp.choices[0].finish_reason,
         )
+        setattr(choice_data, 'gen_tokens', output_token_ids or None)
         resp = CompletionResponse(id=stream_resp.id,
                                   model=stream_resp.model,
                                   choices=[choice_data],
@@ -440,6 +445,7 @@ class NodeManager:
 
     async def _merge_chat_completions_stream(self, request: Dict, node_url: str, endpoint: str, consumed, fut):
         generated_text = ''
+        output_token_ids: List[int] = []
         status = self.nodes[node_url]
         timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -458,7 +464,9 @@ class NodeManager:
                         pass
                     else:
                         stream_resp = ChatCompletionStreamResponse.model_validate_json(chunk)
-                        generated_text += stream_resp.choices[0].delta.content
+                        delta = stream_resp.choices[0].delta
+                        generated_text += delta.content
+                        output_token_ids.extend(getattr(delta, 'gen_tokens', []) or [])
 
         # TODO: support reasoning and tool call
         choice_data = ChatCompletionResponseChoice(
@@ -466,6 +474,7 @@ class NodeManager:
             message=ChatMessage(role='assistant', content=generated_text),
             finish_reason=stream_resp.choices[0].finish_reason,
         )
+        setattr(choice_data.message, 'gen_tokens', output_token_ids or None)
         resp = ChatCompletionResponse(id=stream_resp.id,
                                       model=stream_resp.model,
                                       choices=[choice_data],

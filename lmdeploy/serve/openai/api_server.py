@@ -344,7 +344,9 @@ async def chat_completions_v1(raw_request: Request = None):
     - frequency_penalty (replaced with repetition_penalty)
     """
     json_request = await raw_request.json()
+    print('json_request', json_request)
     request = ChatCompletionRequest.model_validate(json_request)
+    print('request', request)
     migration_request = json_request.pop('migration_request', None)
     with_cache = json_request.pop('with_cache', False)
     preserve_cache = json_request.pop('preserve_cache', False)
