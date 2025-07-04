@@ -906,7 +906,8 @@ class BaseModelAgent:
         if 'weights' in tags:
             # TODO: find better way to avoid reset graph
             self.reset_graph_runner()
-            self.patched_model.get_model().cpu()
+            self.patched_model.get_model().to('meta')
+            self.patched_model = None
         if 'kv_cache' in tags:
             self.cache_engine = None
         torch.cuda.empty_cache()
@@ -917,7 +918,8 @@ class BaseModelAgent:
         if tags is None:
             tags = ['weights', 'kv_cache']
         if 'weights' in tags:
-            self.patched_model.get_model().to(torch.cuda.current_device())
+            self.build_model()
+            self.build_graph_runner()
         if 'kv_cache' in tags:
             self.build_cache_engine()
 
