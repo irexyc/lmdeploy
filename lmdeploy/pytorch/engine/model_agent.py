@@ -892,11 +892,11 @@ class BaseModelAgent:
                     mod.update_weights()
 
             torch.cuda.empty_cache()
-            if request.finished:
-                # After finishing the weight transferring from trainer to inference engine,
-                # the kv cache engine is built.
-                logger.info(f'Building CacheEngine with config: \n{self.cache_config}.')
-                self.build_cache_engine()
+            # if request.finished:
+            #     # After finishing the weight transferring from trainer to inference engine,
+            #     # the kv cache engine is built.
+            #     logger.info(f'Building CacheEngine with config: \n{self.cache_config}.')
+            #     self.build_cache_engine()
 
     @torch.inference_mode()
     def sleep(self, tags: Optional[List[str]] = None):
@@ -915,12 +915,14 @@ class BaseModelAgent:
     @torch.inference_mode()
     def wakeup(self, tags: Optional[List[str]] = None):
         """Wakeup."""
+        torch.cuda.empty_cache()
         if tags is None:
             tags = ['weights', 'kv_cache']
         if 'weights' in tags:
             self.build_model()
             self.build_graph_runner()
         if 'kv_cache' in tags:
+            logger.info(f'Building CacheEngine with config: \n{self.cache_config}.')
             self.build_cache_engine()
 
     def release(self):
