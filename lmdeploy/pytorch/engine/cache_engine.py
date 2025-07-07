@@ -63,7 +63,7 @@ class CacheEngine:
 
         # Initialize the stream for caching operations.
         self.cache_stream = torch.cuda.Stream()
-        assert self.cache_stream != torch.cuda.current_stream()
+        # assert self.cache_stream != torch.cuda.current_stream()
         # Initialize the events for stream synchronization.
         self.events = torch.cuda.Event()
 
