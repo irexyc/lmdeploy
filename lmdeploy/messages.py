@@ -319,6 +319,7 @@ class PytorchEngineConfig:
         migration_backend: migration backend. options: ['DLSlime'].
             Default to `MigrationBackend.DLSlime`.
         model_format (str): weight quantization policy, options: ['fp8'].
+        logprobs_mode (str): The mode of logprob, options: ['raw_logits', 'raw_logprobs']
     """
     dtype: str = 'auto'
     tp: int = 1
@@ -347,6 +348,7 @@ class PytorchEngineConfig:
     enable_microbatch: bool = False
     enable_eplb: bool = False
     model_format: str = None
+    logprobs_mode: str = None
 
     role: EngineRole = EngineRole.Hybrid
     migration_backend: MigrationBackend = MigrationBackend.DLSlime

@@ -5,7 +5,6 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import ray
 import ray.exceptions
 import torch
@@ -298,10 +297,7 @@ class RayWorkerWrapper(WorkerWrapperBase):
 
     def pack_output(self, output: Dict):
         """Pack output."""
-        for k, v in output.items():
-            if isinstance(v, torch.Tensor):
-                output[k] = v.numpy()
-        return output
+        return output.to_numpy()
 
     def exit(self):
         """Exit actor."""
@@ -448,10 +444,7 @@ class RayExecutor(ExecutorBase):
             outs = await self.workers[0].get_outputs.remote()
             logger.debug(f'Receive {len(outs)} outputs from worker[0].')
             for out in outs:
-                # pack pytorch
-                for k, v in out.items():
-                    if isinstance(v, np.ndarray):
-                        out[k] = torch.from_numpy(v)
+                out = out.to_tensor()
                 self.remote_outs.put_nowait(out)
 
     def _prefetch_task_callback(self, task: asyncio.Task):

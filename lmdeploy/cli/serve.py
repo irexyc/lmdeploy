@@ -153,6 +153,7 @@ class SubCliServe:
         ArgumentHelper.adapters(pt_group)
         ArgumentHelper.device(pt_group)
         ArgumentHelper.eager_mode(pt_group)
+        ArgumentHelper.logprobs_mode(pt_group)
 
         # common engine args
         dtype_act = ArgumentHelper.dtype(pt_group)
@@ -335,7 +336,8 @@ class SubCliServe:
                                                  enable_eplb=args.enable_eplb,
                                                  role=EngineRole[args.role],
                                                  migration_backend=MigrationBackend[args.migration_backend],
-                                                 model_format=args.model_format)
+                                                 model_format=args.model_format,
+                                                 logprobs_mode=args.logprobs_mode)
         else:
             from lmdeploy.messages import TurbomindEngineConfig
             backend_config = TurbomindEngineConfig(dtype=args.dtype,

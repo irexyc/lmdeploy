@@ -575,3 +575,12 @@ class ArgumentHelper:
                                    default='DLSlime',
                                    choices=['DLSlime', 'Mooncake'],
                                    help='kvcache migration management backend when PD disaggregation')
+
+    @staticmethod
+    def logprobs_mode(parser):
+        """The mode of logprobs."""
+        parser.add_argument('--logprobs-mode',
+                            type=str,
+                            default=None,
+                            choices=[None, 'raw_logits', 'raw_logprobs'],
+                            help='The mode of logprobs.')
