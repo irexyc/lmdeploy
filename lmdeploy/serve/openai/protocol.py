@@ -107,12 +107,11 @@ class ChatCompletionRequest(BaseModel):
     """Chat completion request."""
     model: str
 
-    messages: Union[str, List[Dict[str, Any]]] = Field(examples=[[{'role': 'user', 'content': 'hi'}]])  # noqa
+    messages: Union[str, List[Dict[str, Any]]] = Field(examples=[[{'role': 'user', 'content': 'hi'}]])
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[Tool]] = Field(default=None, examples=[None])
-    tool_choice: Union[ToolChoice, Literal['auto', 'required', 'none']] = Field(default='auto',
-                                                                                examples=['none'])  # noqa
+    tool_choice: Union[ToolChoice, Literal['auto', 'required', 'none']] = Field(default='auto', examples=['none'])
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = None
     n: Optional[int] = 1
@@ -139,6 +138,7 @@ class ChatCompletionRequest(BaseModel):
     min_p: float = 0.0
     enable_thinking: Optional[bool] = None
     return_token_ids: Optional[bool] = False
+    include_stop_str_in_output: Optional[bool] = False
 
 
 class FunctionCall(BaseModel):

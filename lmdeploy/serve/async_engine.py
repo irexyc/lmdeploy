@@ -620,7 +620,6 @@ class AsyncEngine(LogitsMixin):
             step: int = 0,
             do_preprocess: bool = True,
             adapter_name: Optional[str] = None,
-            skip_stop_tokens: bool = True,
             rewind_stop_tokens: bool = False,
             input_ids: Optional[List] = None,
             enable_thinking: Optional[bool] = None,
@@ -713,9 +712,8 @@ class AsyncEngine(LogitsMixin):
         def is_error(status):
             return status not in [ResponseType.SUCCESS, ResponseType.FINISH]
 
-        # used to skip / rewind stop words in interactive mode
         stop_ids = []
-        if skip_stop_tokens and not gen_config.ignore_eos:
+        if not gen_config.ignore_eos:
             stop_ids = gen_config.stop_token_ids or []
 
         async with self.model_inst(session_id) as inst:
@@ -795,13 +793,16 @@ class AsyncEngine(LogitsMixin):
                 # end of generator loop
 
                 if not is_error(outputs.status):
-                    finish_reason = 'length' \
-                        if gen_len >= gen_config.max_new_tokens else 'stop'
-                    # utf-8 char at the end means it's a potential unfinished
-                    # byte sequence
+                    finish_reason = 'stop' if outputs.token_ids[-1] in stop_ids else 'length'
+                    # utf-8 char at the end means it's a potential unfinished byte sequence
                     if not response.endswith('�'):
                         # avoid returning the last response twice
                         response = ''
+                    token_ids = []
+                    if gen_config.include_stop_str_in_output and finish_reason == 'stop':
+                        # return the eos token id (MUST be in a list) and its string
+                        token_ids = outputs.token_ids[-1:]
+                        response = self.tokenizer.decode(token_ids, skip_special_tokens=False)
                     logger.info(f'session {session_id} finished, reason '
                                 f'"{finish_reason}", input_tokens '
                                 f'{len(input_ids)}, output_tokens {gen_len}')
@@ -810,7 +811,7 @@ class AsyncEngine(LogitsMixin):
                                  len(input_ids),
                                  gen_len,
                                  finish_reason,
-                                 token_ids=[],
+                                 token_ids=token_ids,
                                  cache_block_ids=outputs.cache_block_ids)
                 else:
                     logger.error(f'session {session_id} finished, '

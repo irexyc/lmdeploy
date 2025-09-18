@@ -391,25 +391,28 @@ async def chat_completions_v1(raw_request: Request = None):
 
     random_seed = request.seed if request.seed else None
 
-    gen_config = GenerationConfig(max_new_tokens=request.max_tokens,
-                                  do_sample=True,
-                                  logprobs=gen_logprobs,
-                                  top_k=request.top_k,
-                                  top_p=request.top_p,
-                                  temperature=request.temperature,
-                                  repetition_penalty=request.repetition_penalty,
-                                  ignore_eos=request.ignore_eos,
-                                  stop_words=request.stop,
-                                  skip_special_tokens=request.skip_special_tokens,
-                                  response_format=response_format,
-                                  logits_processors=logits_processors,
-                                  min_new_tokens=request.min_new_tokens,
-                                  min_p=request.min_p,
-                                  random_seed=random_seed,
-                                  spaces_between_special_tokens=request.spaces_between_special_tokens,
-                                  migration_request=migration_request,
-                                  with_cache=with_cache,
-                                  preserve_cache=preserve_cache)
+    gen_config = GenerationConfig(
+        max_new_tokens=request.max_tokens,
+        do_sample=True,
+        logprobs=gen_logprobs,
+        top_k=request.top_k,
+        top_p=request.top_p,
+        temperature=request.temperature,
+        repetition_penalty=request.repetition_penalty,
+        ignore_eos=request.ignore_eos,
+        stop_words=request.stop,
+        include_stop_str_in_output=request.include_stop_str_in_output,
+        skip_special_tokens=request.skip_special_tokens,
+        response_format=response_format,
+        logits_processors=logits_processors,
+        min_new_tokens=request.min_new_tokens,
+        min_p=request.min_p,
+        random_seed=random_seed,
+        spaces_between_special_tokens=request.spaces_between_special_tokens,
+        migration_request=migration_request,
+        with_cache=with_cache,
+        preserve_cache=preserve_cache,
+    )
 
     tools = None
     if request.tools and request.tool_choice != 'none':
