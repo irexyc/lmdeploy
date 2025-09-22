@@ -779,6 +779,8 @@ class AsyncEngine(LogitsMixin):
                     if outputs.logprobs is not None:
                         log_offset = ids_offset - start_ids_offset
                         out.logprobs = outputs.logprobs[log_offset:]
+                        if hit_stop_token:
+                            out.logprobs = out.logprobs[:-hit_stop_token]
                     if outputs.last_hidden_state is not None:
                         out.last_hidden_state = outputs.last_hidden_state
                         if hit_stop_token:
@@ -798,11 +800,15 @@ class AsyncEngine(LogitsMixin):
                     if not response.endswith('�'):
                         # avoid returning the last response twice
                         response = ''
-                    token_ids = []
+                    token_ids, logits, last_hidden_state, logprobs = [], None, None, None
                     if gen_config.include_stop_str_in_output and finish_reason == 'stop':
-                        # return the eos token id (MUST be in a list) and its string
+                        # return the eos token id (MUST be in a list), eos string, eos token's logits and so on
                         token_ids = outputs.token_ids[-1:]
                         response = self.tokenizer.decode(token_ids, skip_special_tokens=False)
+                        logits = outputs.logits[-1:] if outputs.logits else None
+                        last_hidden_state = outputs.last_hidden_state[-1:] if outputs.last_hidden_state else None
+                        logprobs = outputs.logprobs[-1:] if outputs.logprobs else None
+
                     logger.info(f'session {session_id} finished, reason '
                                 f'"{finish_reason}", input_tokens '
                                 f'{len(input_ids)}, output_tokens {gen_len}')
@@ -812,6 +818,9 @@ class AsyncEngine(LogitsMixin):
                                  gen_len,
                                  finish_reason,
                                  token_ids=token_ids,
+                                 logprobs=logprobs,
+                                 logits=logits,
+                                 last_hidden_state=last_hidden_state,
                                  cache_block_ids=outputs.cache_block_ids)
                 else:
                     logger.error(f'session {session_id} finished, '
