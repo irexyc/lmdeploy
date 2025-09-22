@@ -1284,8 +1284,8 @@ def serve(model_path: str,
 
     handle_torchrun()
     _, pipeline_class = get_task(model_path)
-    if isinstance(backend_config, PytorchEngineConfig):
-        backend_config.enable_mp_engine = True
+    # if isinstance(backend_config, PytorchEngineConfig):
+    #     backend_config.enable_mp_engine = True
     VariableInterface.async_engine = pipeline_class(model_path=model_path,
                                                     model_name=model_name,
                                                     backend=backend,

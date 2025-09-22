@@ -525,9 +525,18 @@ class RayExecutor(ExecutorBase):
                 runtime_env = _update_runtime_envs(runtime_env)
                 if _envs.ray_nsys_enable:
                     runtime_env = _update_runtime_env_nsys(runtime_env)
+                noset_cuda_visible_devices = os.getenv('RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES')
+                logger.info(f'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES={noset_cuda_visible_devices}')
+                num_gpus = 1.0 if noset_cuda_visible_devices is None else 0
+                if noset_cuda_visible_devices:
+                    visible_devices = os.getenv('CUDA_VISIBLE_DEVICES')
+                    logger.info(f'CUDA_VISIBLE_DEVICES={visible_devices}')
+                    assert visible_devices is not None
+                    visible_devices = visible_devices.split(',')
+                    runtime_env['env_vars'].update(dict(CUDA_VISIBLE_DEVICES=visible_devices[_]))
                 worker = ray.remote(
                     num_cpus=0,
-                    num_gpus=0.01,
+                    num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     runtime_env=runtime_env,
                 )(RayWorkerWrapper).remote(**worker_kwargs)
