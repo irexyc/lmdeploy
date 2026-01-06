@@ -57,6 +57,7 @@ public:
     virtual void ReduceScatter(const void*  sendbuff,  //
                                void*        recvbuff,
                                size_t       recvcount,
+                               size_t       totalcount,
                                DataType     type,
                                int          group,
                                cudaStream_t stream)

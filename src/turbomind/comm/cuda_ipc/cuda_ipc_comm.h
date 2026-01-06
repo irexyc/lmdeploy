@@ -80,6 +80,14 @@ public:
     void AllReduceSum(
         const void* sendbuff, void* recvbuff, size_t count, DataType type, int group, cudaStream_t stream) override;
 
+    void ReduceScatter(const void*  sendbuff,
+                       void*        recvbuff,
+                       size_t       recvcount,
+                       size_t       totalcount,
+                       DataType     type,
+                       int          group,
+                       cudaStream_t stream) override;
+
     void AllGather(
         const void* sendbuff, void* recvbuff, size_t sendcount, DataType type, int group, cudaStream_t stream) override;
 

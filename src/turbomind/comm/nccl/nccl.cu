@@ -260,9 +260,15 @@ public:
         NCCLCHECK(ncclGroupEnd());
     }
 
-    void ReduceScatter(
-        const void* sendbuff, void* recvbuff, size_t recvcount, DataType type, int group, cudaStream_t stream) override
+    void ReduceScatter(const void*  sendbuff,
+                       void*        recvbuff,
+                       size_t       recvcount,
+                       size_t       totalcount,
+                       DataType     type,
+                       int          group,
+                       cudaStream_t stream) override
     {
+        TM_CHECK(n_ranks(group) * recvcount == totalcount);
         NCCLCHECK(ncclGroupStart());
         NCCLCHECK(
             ncclReduceScatter(sendbuff, recvbuff, recvcount, to_nccl_dtype(type), ncclSum, groups_.at(group), stream));
@@ -305,7 +311,7 @@ public:
             const size_t recvcount = slice * dim;
             auto         sendbuff  = hidden;
             auto         recvbuff  = (char*)hidden + elem_size * rank * recvcount;
-            ReduceScatter(sendbuff, recvbuff, recvcount, dtype, group, stream);
+            ReduceScatter(sendbuff, recvbuff, recvcount, recvcount * n_ranks, dtype, group, stream);
             rms_norm(rank * slice, slice);
             AllGather(recvbuff, sendbuff, recvcount, dtype, group, stream);
         }
