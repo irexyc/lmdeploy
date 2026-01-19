@@ -138,6 +138,32 @@ public:
                      int          group,
                      cudaStream_t stream) override;
 
+    void AllToAllDispatch(int*         recv_info,
+                          void*        recv_hidden,
+                          float*       recv_scales,
+                          int8_t*      recv_masks,
+                          void*        hidden,
+                          float*       topk_scales,
+                          int*         topk_experts,
+                          int*         token_idx_in_rank,
+                          int          token_num,
+                          int          dim,
+                          int          topk,
+                          int          expert_num,
+                          DataType     type,
+                          int          group,
+                          cudaStream_t stream) override;
+
+    void AllToAllCombine(void*        hidden,
+                         int*         recv_info,
+                         void*        recv_hidden,
+                         int*         token_idx_in_rank,
+                         int          token_num,
+                         int          dim,
+                         DataType     type,
+                         int          group,
+                         cudaStream_t stream) override;
+
 private:
     template<class T>
     inline SymmetricPtr_V2<T> get_symmetric_v2(T* ptr, int group)

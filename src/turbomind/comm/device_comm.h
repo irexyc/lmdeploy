@@ -118,6 +118,38 @@ public:
     {
         throw std::runtime_error("not implemented");
     }
+
+    virtual void AllToAllDispatch(int*         recv_info,
+                                  void*        recv_hidden,
+                                  float*       recv_scales,
+                                  int8_t*      recv_masks,
+                                  void*        hidden,
+                                  float*       topk_scales,
+                                  int*         topk_experts,
+                                  int*         token_idx_in_rank,
+                                  int          token_num,
+                                  int          dim,
+                                  int          topk,
+                                  int          expert_num,
+                                  DataType     type,
+                                  int          group,
+                                  cudaStream_t stream)
+    {
+        throw std::runtime_error("not implemented");
+    }
+
+    virtual void AllToAllCombine(void*        hidden,
+                                 int*         recv_info,
+                                 void*        recv_hidden,
+                                 int*         token_idx_in_rank,
+                                 int          token_num,
+                                 int          dim,
+                                 DataType     type,
+                                 int          group,
+                                 cudaStream_t stream)
+    {
+        throw std::runtime_error("not implemented");
+    }
 };
 
 class DeviceComm {
