@@ -45,6 +45,8 @@ __global__ void AllToAllDispatch_Notify(Array<int*, kMaxRanks> recv_info,  //
     sem.Signal(false);
     sem.Wait(false);
 
+    __syncthreads();
+
     if (lane_id < ranks) {
         auto chn = cvta_generic_to_global(recv_info[rank]);
         for (int i = 1; i < ranks; ++i) {
