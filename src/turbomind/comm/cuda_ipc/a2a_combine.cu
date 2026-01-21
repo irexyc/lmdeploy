@@ -13,6 +13,92 @@
 
 namespace turbomind::comm {
 
+template<class T, int vec_size, int tokens_per_batch>
+__global__ void AllToAllCombine_Simple_Pull_V2(T*                   hidden,
+                                               SystemSemaphoreInfo* semaphores,
+                                               Array<T*, kMaxRanks> recv_hidden,
+                                               int*                 recv_info,
+                                               int                  rank,
+                                               int                  ranks,
+                                               int*                 token_idx_in_rank,
+                                               int                  token_num,
+                                               int                  dim,
+                                               constant<vec_size>,
+                                               constant<tokens_per_batch>)
+{
+    SystemSemaphore sem(semaphores, ranks, blockIdx.x, threadIdx.x);
+
+    sem.Signal(false);
+    sem.Wait(false);
+    __syncthreads();
+
+    __shared__ int s_send_idx[tokens_per_batch][kMaxRanks];
+
+    int s_rank_offset[kMaxRanks];
+    for (int r = 0; r < ranks; ++r) {
+        s_rank_offset[r] = (rank == 0) ? 0 : __ldg(&recv_info[(rank - 1) * ranks + r]);
+    }
+
+    using Vec = Array<T, vec_size>;
+    using namespace ops;
+
+    const int dim_vecs = dim / vec_size;
+
+    const int total_batches   = cdiv(token_num, tokens_per_batch);
+    const int batches_per_cta = cdiv(total_batches, (int)gridDim.x);
+    const int batch_start     = blockIdx.x * batches_per_cta;
+    const int batch_end       = min(batch_start + batches_per_cta, total_batches);
+
+    for (int batch = batch_start; batch < batch_end; ++batch) {
+        const int token_base      = batch * tokens_per_batch;
+        const int tokens_in_batch = min(tokens_per_batch, token_num - token_base);
+        for (int i = threadIdx.x; i < tokens_in_batch * ranks; i += blockDim.x) {
+            const int local_token_idx             = i / ranks;
+            const int dst_rank                    = i % ranks;
+            const int token_idx                   = token_base + local_token_idx;
+            const int index                       = dst_rank * (token_num + 2) + token_idx;
+            s_send_idx[local_token_idx][dst_rank] = __ldg(&token_idx_in_rank[index]);
+        }
+        __syncthreads();
+
+        const int work_per_batch = tokens_in_batch * dim_vecs;
+        for (int i = threadIdx.x; i < work_per_batch; i += blockDim.x) {
+            const int local_token_idx = i / dim_vecs;
+            const int vec_idx         = i % dim_vecs;
+            const int token_idx       = token_base + local_token_idx;
+
+            T* src_ptrs[kMaxRanks]{};
+            PRAGMA_UNROLL
+            for (int r = 0; r < kMaxRanks; ++r) {
+                if (r < ranks) {
+                    int send_idx = s_send_idx[local_token_idx][r];
+                    if (send_idx >= 0) {
+                        int offset  = (s_rank_offset[r] + send_idx) * dim + vec_idx * vec_size;
+                        src_ptrs[r] = recv_hidden[r] + offset;
+                    }
+                }
+            }
+
+            Vec acc{};
+            PRAGMA_UNROLL
+            for (int r = 0; r < kMaxRanks; ++r) {
+                if (src_ptrs[r]) {
+                    Vec tmp;
+                    Load(tmp, src_ptrs[r]);
+                    acc = acc + tmp;
+                }
+            }
+            Store(hidden + token_idx * dim + vec_idx * vec_size, acc);
+        }
+        __syncthreads();
+    }
+
+    __syncthreads();
+    sem.Signal(true);
+    sem.Wait(true);
+    sem.Update(semaphores, ranks, blockIdx.x, threadIdx.x);
+}
+
 template<class T,
          int tokens_per_block,
          int threads_per_token,
@@ -97,33 +183,40 @@ void CudaIpcCommImpl::AllToAllCombine(void*        hidden,
 
     auto semaphore = groups_.at(group).semaphore.handle();
 
-    auto invoke = [&](auto t) {
-        using T                         = decltype(t);
-        auto          symm_recv_hidden  = get_symmetric_v2((T*)recv_hidden, group);
-        constexpr int vec_size          = sizeof(uint4) / sizeof(T);
-        constexpr int threads           = 1024;
-        constexpr int threads_per_token = 128;
-        constexpr int tokens_per_block  = threads / threads_per_token;
-        const int     max_ctas          = max_ctas_.apply(48);
-
-        AllToAllCombine_Simple_Pull<<<max_ctas, threads, 0, stream>>>(  //
-            (T*)hidden,
-            semaphore,
-            symm_recv_hidden.uc,
-            recv_info,
-            rank,
-            n_ranks,
-            token_idx_in_rank,
-            token_num,
-            dim,
-            cdiv(token_num, max_ctas),
-            constant<tokens_per_block>{},
-            constant<threads_per_token>{},
-            constant<vec_size>{});
+    auto invoke = [&](auto t, auto tokens_per_batch) {
+        using T                        = decltype(t);
+        auto          symm_recv_hidden = get_symmetric_v2((T*)recv_hidden, group);
+        constexpr int vec_size         = sizeof(uint4) / sizeof(T);
+        constexpr int threads          = 1024;
+        const int     max_ctas         = max_ctas_.apply(48);
+        AllToAllCombine_Simple_Pull_V2<<<max_ctas, threads, 0, stream>>>((T*)hidden,
+                                                                         semaphore,
+                                                                         symm_recv_hidden.uc,
+                                                                         recv_info,
+                                                                         rank,
+                                                                         n_ranks,
+                                                                         token_idx_in_rank,
+                                                                         token_num,
+                                                                         dim,
+                                                                         constant<vec_size>{},
+                                                                         tokens_per_batch);
         sync_check_cuda_error();
     };
 
-    TM_DISPATCH_PRIMARY_DTYPES(type, invoke);
+    auto dispatch_tokens = [&](auto t) {
+        if (token_num <= 16) {
+            return invoke(t, constant<1>{});
+        }
+        if (token_num <= 64) {
+            return invoke(t, constant<4>{});
+        }
+        else if (token_num <= 256) {
+            return invoke(t, constant<16>{});
+        }
+        return invoke(t, constant<32>{});
+    };
+
+    TM_DISPATCH_PRIMARY_DTYPES(type, dispatch_tokens);
 }
 
 }  // namespace turbomind::comm
