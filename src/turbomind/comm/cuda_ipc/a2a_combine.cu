@@ -28,8 +28,8 @@ __global__ void AllToAllCombine_Simple_Pull_V2(T*                   hidden,
 {
     SystemSemaphore sem(semaphores, ranks, blockIdx.x, threadIdx.x);
 
-    sem.Signal(false);
-    sem.Wait(false);
+    sem.Signal(true);
+    sem.Wait(true);
     __syncthreads();
 
     __shared__ int s_send_idx[tokens_per_batch][kMaxRanks];

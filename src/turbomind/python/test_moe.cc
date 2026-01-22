@@ -25,36 +25,40 @@ using namespace pybind11::literals;  // enables _a argument literal
 namespace turbomind {
 
 template<typename Func>
-void bench(const std::string& name, int rank, cudaStream_t stream, Func&& func, int warmup = 100, int iterations = 5000)
+float bench(
+    const std::string& name, int rank, cudaStream_t stream, Func&& func, int warmup = 100, int iterations = 5000)
 {
-    cudaStreamSynchronize(stream);
-
     // warmup
     for (int i = 0; i < warmup; ++i) {
         func();
     }
-    cudaStreamSynchronize(stream);
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    cudaEvent_t start[iterations], stop[iterations];
+    for (int i = 0; i < iterations; ++i) {
+        cudaEventCreate(&start[i]);
+        cudaEventCreate(&stop[i]);
+    }
 
     std::vector<float> times;
     times.reserve(iterations);
 
     for (int i = 0; i < iterations; ++i) {
-        cudaEventRecord(start, stream);
+        cudaEventRecord(start[i], stream);
         func();
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
+        cudaEventRecord(stop[i], stream);
+    }
+    cudaStreamSynchronize(stream);
 
+    for (int i = 0; i < iterations; ++i) {
         float milliseconds = 0;
-        cudaEventElapsedTime(&milliseconds, start, stop);
+        cudaEventElapsedTime(&milliseconds, start[i], stop[i]);
         times.push_back(milliseconds);
     }
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    for (int i = 0; i < iterations; ++i) {
+        cudaEventDestroy(start[i]);
+        cudaEventDestroy(stop[i]);
+    }
 
     std::sort(times.begin(), times.end());
 
@@ -78,6 +82,8 @@ void bench(const std::string& name, int rank, cudaStream_t stream, Func&& func, 
            median_time * 1e3f,
            avg_time * 1e3f,
            std_dev * 1e3f);
+
+    return avg_time;
 }
 
 struct MoeBuffer {
@@ -277,7 +283,7 @@ public:
                           stream);
 
         // 2. dispatch (info exchange & a2a)
-        bench("AllToAllDispatch", rank, stream, [&]() {
+        auto dispatch_time = bench("AllToAllDispatch", rank, stream, [&]() {
             d_comm_->AllToAllDispatch(buffer_.recv_info.data(),
                                       buffer_.recv_hidden.data(),
                                       buffer_.recv_scales.data(),
@@ -298,7 +304,7 @@ public:
         // 3. get accum, f2n, f2E, en2f
 
         // 4. combine
-        bench("AllToAllCombine", rank, stream, [&]() {
+        auto combine_time = bench("AllToAllCombine", rank, stream, [&]() {
             d_comm_->AllToAllCombine(recv_x.data_ptr(),
                                      buffer_.recv_info.data(),
                                      buffer_.recv_hidden.data(),
@@ -309,6 +315,12 @@ public:
                                      0,
                                      stream);
         });
+
+        {
+            // barrier
+            auto ptr = d_comm_->Allocate(4);
+            d_comm_->Free(ptr);
+        }
 
         // check preprocess
         auto ref_token_idx_in_rank = torch::empty({ep_size, tokens + 2}, dtype(torch::kInt32).device(torch::kCUDA));
@@ -321,14 +333,25 @@ public:
         {
             auto               cpu_ref_token_idx_in_rank = ref_token_idx_in_rank.to(torch::kCPU);
             std::ostringstream oss;
+            int                total_tokens{};
             for (int i = 0; i < ep_size; ++i) {
                 int send_token = cpu_ref_token_idx_in_rank.data_ptr<int>()[i * (tokens + 2) + tokens];
+                total_tokens += send_token;
                 oss << send_token;
                 if (i != ep_size - 1) {
                     oss << ", ";
                 }
             }
-            printf("rank=%d, send_tokens=[%s]\n", rank, oss.str().c_str());
+            float total_bytes    = total_tokens * hidden * sizeof(__nv_bfloat16);
+            float dispatch_algbw = total_bytes / 1e9f / dispatch_time * 1e3f;
+            float combine_algbw  = total_bytes / 1e9f / combine_time * 1e3f;
+            // printf("rank=%d, send_tokens=[%s]\n", rank, oss.str().c_str());
+            printf("rank=%d, dispatch time=%.3f us, algbw=%.3f GB/s, combine time=%.3f us, algbw=%.3f GB/s\n",
+                   rank,
+                   dispatch_time * 1e3f,
+                   dispatch_algbw,
+                   combine_time * 1e3f,
+                   combine_algbw);
         }
         ref_token_idx_in_rank = ref_token_idx_in_rank.slice(1, 0, tokens).contiguous();
         stream.synchronize();

@@ -23,8 +23,8 @@ __global__ void AllToAllDispatch_Notify(Array<int*, kMaxRanks> recv_info,  //
 
     SystemSemaphore sem(semaphores, ranks, blockIdx.x, threadIdx.x);
 
-    sem.Signal(false);
-    sem.Wait(false);
+    sem.Signal(true);
+    sem.Wait(true);
 
     __syncthreads();
 
@@ -59,7 +59,7 @@ __global__ void AllToAllDispatch_Notify(Array<int*, kMaxRanks> recv_info,  //
     sem.Update(semaphores, ranks, blockIdx.x, threadIdx.x);
 }
 
-template<class T, int kVecSize, int kMaxRanks>
+template<class T, int vec_size>
 __global__ void __launch_bounds__(1024, 1)  //
     AllToAllDispatch_Simple_Push(Array<T*, kMaxRanks>      recv_hidden,
                                  Array<float*, kMaxRanks>  recv_scales,
@@ -77,7 +77,7 @@ __global__ void __launch_bounds__(1024, 1)  //
                                  int                       dim,
                                  int                       topk,
                                  int                       local_expert_num,
-                                 constant<kVecSize>)
+                                 constant<vec_size>)
 {
     const int bi = blockIdx.x;
 
@@ -115,13 +115,13 @@ __global__ void __launch_bounds__(1024, 1)  //
         int dst_idx  = rank_send_offset[dst_rank] + send_idx;
         if (send_idx >= 0) {
             // hidden
-            using Vec = Array<T, kVecSize>;
+            using Vec = Array<T, vec_size>;
             T* src    = (T*)(hidden + token_idx * dim);
             T* dst    = (T*)(recv_hidden[dst_rank] + dst_idx * dim);
             for (int i = lane_id; i < hidden_load_iters; i += WARP_SIZE) {
                 Vec tmp;
-                Ldg(tmp, src + i * kVecSize);
-                Stcg(dst + i * kVecSize, tmp);
+                Ldg(tmp, src + i * vec_size);
+                Stcg(dst + i * vec_size, tmp);
             }
             // scales and masks
             if (lane_id < topk) {
