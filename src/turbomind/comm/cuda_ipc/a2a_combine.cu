@@ -93,7 +93,6 @@ __global__ void AllToAllCombine_Simple_Pull_V2(T*                   hidden,
         __syncthreads();
     }
 
-    __syncthreads();
     sem.Signal(true);
     sem.Wait(true);
     sem.Update(semaphores, ranks, blockIdx.x, threadIdx.x);

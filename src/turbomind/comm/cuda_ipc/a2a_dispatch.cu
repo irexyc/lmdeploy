@@ -60,43 +60,44 @@ __global__ void AllToAllDispatch_Notify(Array<int*, kMaxRanks> recv_info,  //
 }
 
 template<class T, int kVecSize, int kMaxRanks>
-__global__ void AllToAllDispatch_Simple_Push(Array<T*, kMaxRanks>      recv_hidden,
-                                             Array<float*, kMaxRanks>  recv_scales,
-                                             Array<int8_t*, kMaxRanks> recv_masks,
-                                             SystemSemaphoreInfo*      semaphores,
-                                             Array<int*, kMaxRanks>    recv_info,
-                                             T*                        hidden,
-                                             int                       hidden_load_iters,
-                                             float*                    topk_scales,
-                                             int*                      topk_experts,
-                                             int*                      token_idx_in_rank,
-                                             int                       rank,
-                                             int                       ranks,
-                                             int                       token_num,
-                                             int                       dim,
-                                             int                       topk,
-                                             int                       local_expert_num,
-                                             constant<kVecSize>)
+__global__ void __launch_bounds__(1024, 1)  //
+    AllToAllDispatch_Simple_Push(Array<T*, kMaxRanks>      recv_hidden,
+                                 Array<float*, kMaxRanks>  recv_scales,
+                                 Array<int8_t*, kMaxRanks> recv_masks,
+                                 SystemSemaphoreInfo*      semaphores,
+                                 Array<int*, kMaxRanks>    recv_info,
+                                 T*                        hidden,
+                                 int                       hidden_load_iters,
+                                 float*                    topk_scales,
+                                 int*                      topk_experts,
+                                 int*                      token_idx_in_rank,
+                                 int                       rank,
+                                 int                       ranks,
+                                 int                       token_num,
+                                 int                       dim,
+                                 int                       topk,
+                                 int                       local_expert_num,
+                                 constant<kVecSize>)
 {
     const int bi = blockIdx.x;
 
     SystemSemaphore sem(semaphores, ranks, blockIdx.x, threadIdx.x);
 
-    sem.Signal(false);
-    sem.Wait(false);
+    __shared__ int rank_send_offset[kMaxRanks];   // token send offset for each rank
+    __shared__ int rank_token_count[kMaxRanks];   // token count for each rank
+    __shared__ int rank_token_padded[kMaxRanks];  // padded token count
 
-    __syncthreads();
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
 
-    int rank_send_offset[kMaxRanks];   // token send offset for each rank
-    int rank_token_count[kMaxRanks];   // token count for each rank
-    int rank_token_padded[kMaxRanks];  // padded token count
-    for (int r = 0; r < ranks; ++r) {
-        rank_send_offset[r]  = (rank == 0) ? 0 : __ldg(&recv_info[rank][(rank - 1) * ranks + r]);
-        rank_token_count[r]  = __ldg(&recv_info[rank][(ranks - 1) * ranks + r]);
-        rank_token_padded[r] = round_up(rank_token_count[r], kMoeGateVecSize);
+    if (warp_id == 0 && lane_id < ranks) {
+        rank_send_offset[lane_id] = (rank == 0) ? 0 : __ldg(&recv_info[rank][(rank - 1) * ranks + lane_id]);
+    }
+    if (warp_id == 1 && lane_id < ranks) {
+        rank_token_count[lane_id]  = __ldg(&recv_info[rank][(ranks - 1) * ranks + lane_id]);
+        rank_token_padded[lane_id] = round_up(rank_token_count[lane_id], kMoeGateVecSize);
     }
 
-    const int lane_id              = threadIdx.x % WARP_SIZE;
     const int num_threads_per_rank = blockDim.x / ranks;
     const int dst_rank             = threadIdx.x / num_threads_per_rank;
     const int num_warps_per_rank   = num_threads_per_rank / WARP_SIZE;
@@ -105,9 +106,12 @@ __global__ void AllToAllDispatch_Simple_Push(Array<T*, kMaxRanks>      recv_hidd
     const int tok_per_cta     = cdiv(token_num, (int)gridDim.x);
     const int token_start_idx = bi * tok_per_cta;
     const int token_end_idx   = min(token_start_idx + tok_per_cta, token_num);
+
+    __syncthreads();
+
     for (int token_idx = token_start_idx + send_warp_id_in_rank; token_idx < token_end_idx;
          token_idx += num_warps_per_rank) {
-        int send_idx = token_idx_in_rank[dst_rank * (token_num + 2) + token_idx];
+        int send_idx = __ldg(&token_idx_in_rank[dst_rank * (token_num + 2) + token_idx]);
         int dst_idx  = rank_send_offset[dst_rank] + send_idx;
         if (send_idx >= 0) {
             // hidden
@@ -117,22 +121,21 @@ __global__ void AllToAllDispatch_Simple_Push(Array<T*, kMaxRanks>      recv_hidd
             for (int i = lane_id; i < hidden_load_iters; i += WARP_SIZE) {
                 Vec tmp;
                 Ldg(tmp, src + i * kVecSize);
-                Store(dst + i * kVecSize, tmp);
+                Stcg(dst + i * kVecSize, tmp);
             }
+            // scales and masks
+            if (lane_id < topk) {
+                const int index = token_idx * ranks * topk + dst_rank * topk + lane_id;
 
-            // scales
-            if (send_warp_id_in_rank == 0 && lane_id < topk) {
-                float s   = topk_scales[token_idx * ranks * topk + rank * topk + lane_id];
-                auto  chn = cvta_generic_to_global(recv_scales[dst_rank]);
-                chn[lane_id * rank_token_count[dst_rank] + dst_idx] = s;
-            }
+                float s = __ldg(&topk_scales[index]);
+                int   e = __ldg(&topk_experts[index]);
 
-            // masks
-            if (send_warp_id_in_rank == 1 && lane_id < topk) {
-                auto e   = topk_experts[token_idx * ranks * topk + rank * topk + lane_id];
-                auto chn = cvta_generic_to_global(recv_masks[dst_rank]);
+                auto scales_chn = recv_scales[dst_rank];
+                auto masks_chn  = recv_masks[dst_rank];
+
+                scales_chn[lane_id * rank_token_count[dst_rank] + dst_idx] = s;
                 if (e >= 0 && e < local_expert_num) {
-                    chn[e * rank_token_padded[dst_rank] + dst_idx] = lane_id;
+                    masks_chn[e * rank_token_padded[dst_rank] + dst_idx] = lane_id;
                 }
             }
         }
