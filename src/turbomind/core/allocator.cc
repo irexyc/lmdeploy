@@ -153,7 +153,7 @@ Allocator::Allocator(DeviceType type)
 
 Allocator::Allocator(Stream stream, bool use_default_pool)
 {
-    impl_ = std::make_shared<CudaMemPoolAllocator>(std::move(stream), use_default_pool);
+    impl_ = std::make_shared<CudaMemPoolAllocator>(std::move(stream), true);
 }
 
 }  // namespace turbomind::core
