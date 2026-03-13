@@ -43,3 +43,22 @@ if (CALL_FROM_SETUP_PY)
       INSTALL_RPATH "${_INSTALL_CUDA_RPATH}"
   )
 endif ()
+
+
+if (TRUE)
+    execute_process(
+      COMMAND python -c "import importlib.util; print(importlib.util.find_spec('torch').submodule_search_locations[0])"
+      RESULT_VARIABLE result
+      OUTPUT_VARIABLE torch_path
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT (result EQUAL 0) OR (torch_path STREQUAL ""))
+        message(FATAL_ERROR "Can't find pytorch")
+    endif()
+    find_package(Torch REQUIRED HINTS ${torch_path}/share/cmake/Torch)
+    find_library(TORCH_PYTHON_LIBRARY torch_python PATHS ${torch_path}/lib)
+
+    pybind11_add_module(_moe test_moe.cc)
+    target_link_libraries(_moe PRIVATE LlamaTritonBackend ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY})
+endif()

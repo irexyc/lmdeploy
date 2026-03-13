@@ -80,6 +80,14 @@ public:
     void AllReduceSum(
         const void* sendbuff, void* recvbuff, size_t count, DataType type, int group, cudaStream_t stream) override;
 
+    void ReduceScatter(const void*  sendbuff,
+                       void*        recvbuff,
+                       size_t       recvcount,
+                       size_t       totalcount,
+                       DataType     type,
+                       int          group,
+                       cudaStream_t stream) override;
+
     void AllGather(
         const void* sendbuff, void* recvbuff, size_t sendcount, DataType type, int group, cudaStream_t stream) override;
 
@@ -129,6 +137,32 @@ public:
                      int2         flags,
                      int          group,
                      cudaStream_t stream) override;
+
+    void AllToAllDispatch(int*         recv_info,
+                          void*        recv_hidden,
+                          float*       recv_scales,
+                          int8_t*      recv_masks,
+                          void*        hidden,
+                          float*       topk_scales,
+                          int*         topk_experts,
+                          int*         token_idx_in_rank,
+                          int          token_num,
+                          int          dim,
+                          int          topk,
+                          int          expert_num,
+                          DataType     type,
+                          int          group,
+                          cudaStream_t stream) override;
+
+    void AllToAllCombine(void*        hidden,
+                         int*         recv_info,
+                         void*        recv_hidden,
+                         int*         token_idx_in_rank,
+                         int          token_num,
+                         int          dim,
+                         DataType     type,
+                         int          group,
+                         cudaStream_t stream) override;
 
 private:
     template<class T>

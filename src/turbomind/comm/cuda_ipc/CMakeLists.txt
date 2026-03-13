@@ -6,6 +6,9 @@ add_library(cuda_ipc_comm STATIC
         cuda_ipc_comm.cu
         allreduce.cu
         allgather.cu
+        reduce_scatter.cu
+        a2a_dispatch.cu
+        a2a_combine.cu
         fused_allreduce.cu
         fused_allreduce_ex.cu
         broadcast.cu)
