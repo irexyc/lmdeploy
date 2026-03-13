@@ -26,8 +26,8 @@ using Decoding_F =
 template<class T, class Tkv>
 using Decoding_Q =
     AttentionUniversal<arch::Sm80,
-                       Mainloop<Sm80_CpAsync<5>, Impl<MMA_81616, T, Tkv, 8, 1, 64, 8, 1, 16, kHeadDim, 5>>,
-                       GetBlockIterFactory<T, Tkv, 64, kHeadDim>,
+                       Mainloop<Sm80_CpAsync<3>, Impl<MMA_81616, T, Tkv, 16, 1, 32, 8, 1, 16, kHeadDim, 3>>,
+                       GetBlockIterFactory<T, Tkv, 32, kHeadDim>,
                        DecodingCtaMap>;
 
 namespace {
