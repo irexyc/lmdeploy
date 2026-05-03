@@ -590,7 +590,9 @@ void TurboMind::Impl::CreateContext(int index)
             const int ll_max_tokens_per_rank = moe_param_.ll_max_tokens_per_rank;
             comm::EpConfig cfg{engine_param_.nnodes,  //
                                max_expert_num,
+                               moe_param_.experts_per_token,
                                (int)model_param_.hidden_units,
+                               engine_param_.max_forward_token_num / tp_cp_size,
                                ll_max_tokens_per_rank};
             c.d_comm->InitializeEp(cfg);
         }

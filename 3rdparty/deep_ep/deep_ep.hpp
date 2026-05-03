@@ -15,6 +15,7 @@
 #include <tuple>
 #include <vector>
 
+using namespace turbomind;
 using turbomind::comm::HostComm;
 using turbomind::comm::DeviceComm;
 using turbomind::core::Tensor;
@@ -114,6 +115,43 @@ public:
     volatile int* moe_recv_rdma_counter        = nullptr;
     int*          moe_recv_rdma_counter_mapped = nullptr;
 
+    // HT Buffer
+    struct {
+        // dispatch output
+        turbomind::core::Buffer moe_recv_expert_counter;
+        turbomind::core::Buffer recv_x;                           // allocated as bf16, view as x.dtype() (bf16/fp8)
+        turbomind::core::Buffer recv_x_scales;                    // allocated as float32, view as int32 (ue8m0)
+        turbomind::core::Buffer recv_topk_idx;                    // int64
+        turbomind::core::Buffer recv_topk_weights;                // float32
+        turbomind::core::Buffer recv_src_idx;                     // int32 (intranode)
+        turbomind::core::Buffer send_head;                        // int32 (intranode)
+        turbomind::core::Buffer recv_src_meta;                    // uint8 (internode)
+        turbomind::core::Buffer rank_prefix_matrix;               // int32 (intranode)
+        turbomind::core::Buffer channel_prefix_matrix;            // int32 (intranode)
+        turbomind::core::Buffer recv_channel_prefix_matrix;       // int32 (intranode)
+        turbomind::core::Buffer rdma_channel_prefix_matrix;       // int32 (internode)
+        turbomind::core::Buffer recv_rdma_rank_prefix_sum;        // int32 (internode)
+        turbomind::core::Buffer gbl_channel_prefix_matrix;        // int32 (internode)
+        turbomind::core::Buffer recv_gbl_rank_prefix_sum;         // int32 (internode)
+        turbomind::core::Buffer recv_rdma_channel_prefix_matrix;  // int32 (internode)
+        turbomind::core::Buffer recv_gbl_channel_prefix_matrix;   // int32 (internode)
+        turbomind::core::Buffer send_rdma_head;                   // int32 (internode)
+        turbomind::core::Buffer send_nvl_head;                    // int32 (internode)
+        // combine output
+        turbomind::core::Buffer combined_x;             // bf16
+        turbomind::core::Buffer combined_topk_weights;  // float32
+    } ht_buffer;
+
+    // LL Buffer
+    struct {
+        turbomind::core::Buffer packed_recv_x;
+        turbomind::core::Buffer packed_recv_src_info;
+        turbomind::core::Buffer packed_recv_layout_range;
+        turbomind::core::Buffer packed_recv_count;
+        turbomind::core::Buffer packed_recv_x_scales;
+        turbomind::core::Buffer combined_x;
+    } ll_buffer;
+
     shared_memory::SharedMemoryAllocator shared_memory_allocator;
 
     Buffer(int      rank,  //
@@ -125,6 +163,11 @@ public:
            bool     enable_shrink,
            bool     use_fabric,
            int      qps_per_rank,
+           int      num_max_tokens_per_rank_ht,
+           int      num_max_tokens_per_rank_ll,
+           int      num_experts,
+           int      experts_per_token,
+           int      hidden,
            HostComm h_comm);
 
     Buffer(): shared_memory_allocator{false} {};
@@ -175,6 +218,7 @@ public:
                        const std::optional<Tensor>& cached_channel_prefix_matrix,
                        int                          expert_alignment,
                        int                          num_worst_tokens,
+                       const core::Buffer&          output,
                        const Config&                config);
 
     std::tuple<Tensor,  //
@@ -249,6 +293,7 @@ public:
                        const std::optional<Tensor>& cached_recv_gbl_rank_prefix_sum,
                        int                          expert_alignment,
                        int                          num_worst_tokens,
+                       const core::Buffer&          output,
                        const Config&                config);
 
     std::tuple<Tensor, std::optional<Tensor>>  //

@@ -41,7 +41,7 @@ __device__ __forceinline__ uint64_t nccl_get_p2p_ptr(const uint64_t&     dst_ptr
                                                      const int&          rank,
                                                      const int&          dst_rank,
                                                      const ncclWindow_t  dev_win,
-                                                     ncclDevComm         dev_comm)
+                                                     ncclDevComm&        dev_comm)
 {
     // Local rank, no need for peer mapping
     if (rank == dst_rank)

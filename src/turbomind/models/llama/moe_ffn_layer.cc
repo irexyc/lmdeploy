@@ -202,6 +202,12 @@ void MoeFfnLayer::RouteEP(ForwardParam& p, Tensor_<float>& logits)
                     core::Context::stream().handle());
     sync_check_cuda_error();
 
+    input_ = empty_like(p.input);
+    if (p.input.shape(0) > 0) {
+        cudaMemcpyAsync(input_.raw_data(), p.input.raw_data(), p.input.byte_size(), cudaMemcpyDefault, st);
+        sync_check_cuda_error();
+    }
+
     ep_mode_ = p.max_tokens_per_rank <= param_.ll_max_tokens_per_rank ? comm::EpMode::kLowLatency :
                                                                         comm::EpMode::kHighThroughput;
 
@@ -215,12 +221,12 @@ void MoeFfnLayer::RouteEP(ForwardParam& p, Tensor_<float>& logits)
     TM_CHECK_LE(p.max_tokens_per_rank * d_comm_->n_ranks(0) * param_.experts_per_token, en2f_.size());
 
     const auto input_type    = p.weights->block.fused_gating_intermediate.input_type;
-    const bool use_fp8       = false;  // input_type == kFloat8_e4m3 || input_type == kBfloat16;
+    const bool use_fp8       = false;  // input_type == kFloat8_e4m3;
     const bool output_scales = use_fp8 && input_type == kFloat8_e4m3;
     const bool zero_copy     = ep_mode_ == comm::EpMode::kLowLatency;
 
     comm::EpDispatchInput dispatch_input{
-        ep_mode_, p.input, topk_weights, topk_idx, num_worst_tokens, use_fp8, output_scales, zero_copy};
+        ep_mode_, input_, topk_weights, topk_idx, p.ht_buffer, num_worst_tokens, use_fp8, output_scales, zero_copy};
     comm::EpDispatchOutput dispatch_output{{}, {}, {}, f2n_, f2E_, en2f_, offsets_, {}};
     d_comm_->Dispatch(dispatch_input, dispatch_output, 0);
     sync_check_cuda_error();
