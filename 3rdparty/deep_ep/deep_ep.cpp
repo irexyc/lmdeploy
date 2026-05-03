@@ -18,9 +18,6 @@
 #include <type_traits>
 #include <unordered_map>
 
-using turbomind::fmtstr;
-using turbomind::round_up;
-
 namespace shared_memory {
 void cu_mem_set_access_all(void* ptr, size_t size)
 {
@@ -161,6 +158,7 @@ Buffer::Buffer(int      rank,
                int      num_max_tokens_per_rank_ht,
                int      num_max_tokens_per_rank_ll,
                int      num_experts,
+               int      experts_per_token,
                int      hidden,
                HostComm h_comm):
     rank(rank),
@@ -239,7 +237,51 @@ Buffer::Buffer(int      rank,
 
     // Allocate buffer in advance
     {
-        auto num_local_experts = num_experts / num_ranks;
+        const auto num_local_experts    = num_experts / num_ranks;
+        const auto max_recv_tokens      = (int64_t)num_max_tokens_per_rank_ht * num_ranks;
+        const auto max_rdma_recv_tokens = (int64_t)num_max_tokens_per_rank_ht * num_rdma_ranks;
+        const auto max_num_scales       = ceil_div<int64_t>(hidden, 128);
+
+        ht_buffer.moe_recv_expert_counter =
+            turbomind::core::Buffer(num_local_experts, turbomind::kInt32, turbomind::kDEVICE);
+        // recv_x_scales: allocated as float32 (4B), viewed as int32 (4B) when ue8m0.
+        ht_buffer.recv_x_scales =
+            turbomind::core::Buffer(max_recv_tokens * max_num_scales, turbomind::kFloat32, turbomind::kDEVICE);
+        ht_buffer.recv_topk_idx =
+            turbomind::core::Buffer(max_recv_tokens * experts_per_token, turbomind::kInt64, turbomind::kDEVICE);
+        ht_buffer.recv_topk_weights =
+            turbomind::core::Buffer(max_recv_tokens * experts_per_token, turbomind::kFloat32, turbomind::kDEVICE);
+        ht_buffer.recv_src_idx = turbomind::core::Buffer(max_recv_tokens, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.send_head =
+            turbomind::core::Buffer(num_max_tokens_per_rank_ht * num_ranks, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.recv_src_meta = turbomind::core::Buffer(
+            max_recv_tokens * internode::get_source_meta_bytes(), turbomind::kUint8, turbomind::kDEVICE);
+        ht_buffer.rank_prefix_matrix =
+            turbomind::core::Buffer((int64_t)num_ranks * num_ranks, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.channel_prefix_matrix =
+            turbomind::core::Buffer((int64_t)num_ranks * num_device_sms / 2, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.recv_channel_prefix_matrix =
+            turbomind::core::Buffer((int64_t)num_ranks * num_device_sms / 2, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.rdma_channel_prefix_matrix = turbomind::core::Buffer(
+            (int64_t)num_rdma_ranks * num_device_sms / 2, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.recv_rdma_rank_prefix_sum =
+            turbomind::core::Buffer(num_rdma_ranks, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.gbl_channel_prefix_matrix =
+            turbomind::core::Buffer((int64_t)num_ranks * num_device_sms / 2, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.recv_gbl_rank_prefix_sum = turbomind::core::Buffer(num_ranks, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.recv_rdma_channel_prefix_matrix = turbomind::core::Buffer(
+            (int64_t)num_rdma_ranks * num_device_sms / 2, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.recv_gbl_channel_prefix_matrix =
+            turbomind::core::Buffer((int64_t)num_ranks * num_device_sms / 2, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.send_rdma_head =
+            turbomind::core::Buffer(num_max_tokens_per_rank_ht * num_rdma_ranks, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.send_nvl_head =
+            turbomind::core::Buffer(max_rdma_recv_tokens * NUM_MAX_NVL_PEERS, turbomind::kInt32, turbomind::kDEVICE);
+        ht_buffer.combined_x =
+            turbomind::core::Buffer(num_max_tokens_per_rank_ht * hidden, turbomind::kBfloat16, turbomind::kDEVICE);
+        ht_buffer.combined_topk_weights = turbomind::core::Buffer(
+            num_max_tokens_per_rank_ht * experts_per_token, turbomind::kFloat32, turbomind::kDEVICE);
+
         ll_buffer.packed_recv_x =
             turbomind::core::Buffer(num_local_experts * num_ranks * num_max_tokens_per_rank_ll * hidden,
                                     turbomind::kBfloat16,
@@ -490,6 +532,7 @@ Buffer::intranode_dispatch(const Tensor&                x,
                            const std::optional<Tensor>& cached_channel_prefix_matrix,
                            int                          expert_alignment,
                            int                          num_worst_tokens,
+                           const core::Buffer&          output,
                            const Config&                config)
 {
     bool cached_mode = cached_rank_prefix_matrix.has_value();
@@ -580,7 +623,7 @@ Buffer::intranode_dispatch(const Tensor&                x,
     std::vector<int> num_recv_tokens_per_expert_list;
 
     // used to compute offsets in MoeFfnLayer
-    auto moe_recv_expert_counter_ten = Tensor({num_local_experts}, turbomind::kInt32, turbomind::kDEVICE);
+    auto moe_recv_expert_counter_ten = Tensor(ht_buffer.moe_recv_expert_counter, {num_local_experts});
 
     // Barrier or send sizes
     // To clean: channel start/end offset, head and tail
@@ -601,8 +644,8 @@ Buffer::intranode_dispatch(const Tensor&                x,
         //                                   comm_stream);
     }
     else {
-        rank_prefix_matrix    = Tensor({num_ranks, num_ranks}, turbomind::kInt32, turbomind::kDEVICE);
-        channel_prefix_matrix = Tensor({num_ranks, num_channels}, turbomind::kInt32, turbomind::kDEVICE);
+        rank_prefix_matrix    = Tensor(ht_buffer.rank_prefix_matrix, {num_ranks, num_ranks});
+        channel_prefix_matrix = Tensor(ht_buffer.channel_prefix_matrix, {num_ranks, num_channels});
 
         // Send sizes
         // Meta information:
@@ -668,28 +711,29 @@ Buffer::intranode_dispatch(const Tensor&                x,
     }
 
     // Allocate new tensors
-    auto recv_x                     = Tensor({num_recv_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
-    auto recv_src_idx               = Tensor({num_recv_tokens}, turbomind::kInt32, turbomind::kDEVICE);
+    auto recv_x                     = Tensor(output.view(x.dtype()), {num_recv_tokens, hidden});
+    auto recv_src_idx               = Tensor(ht_buffer.recv_src_idx, {num_recv_tokens});
     auto recv_topk_idx              = std::optional<Tensor>();
     auto recv_topk_weights          = std::optional<Tensor>();
     auto recv_x_scales              = std::optional<Tensor>();
-    auto recv_channel_prefix_matrix = Tensor({num_ranks, num_channels}, turbomind::kInt32, turbomind::kDEVICE);
-    auto send_head                  = Tensor({num_tokens, num_ranks}, turbomind::kInt32, turbomind::kDEVICE);
+    auto recv_channel_prefix_matrix = Tensor(ht_buffer.recv_channel_prefix_matrix, {num_ranks, num_channels});
+    auto send_head                  = Tensor(ht_buffer.send_head, {num_tokens, num_ranks});
 
     // Assign pointers
     topk_idx_t* recv_topk_idx_ptr     = nullptr;
     float*      recv_topk_weights_ptr = nullptr;
     float*      recv_x_scales_ptr     = nullptr;
     if (topk_idx.has_value()) {
-        recv_topk_idx         = Tensor({num_recv_tokens, num_topk}, topk_idx->dtype(), topk_idx->device());
-        recv_topk_weights     = Tensor({num_recv_tokens, num_topk}, topk_weights->dtype(), topk_weights->device());
+        recv_topk_idx = Tensor(ht_buffer.recv_topk_idx.view(topk_idx->dtype()), {num_recv_tokens, num_topk});
+        recv_topk_weights =
+            Tensor(ht_buffer.recv_topk_weights.view(topk_weights->dtype()), {num_recv_tokens, num_topk});
         recv_topk_idx_ptr     = recv_topk_idx->data_or((topk_idx_t*)nullptr);
         recv_topk_weights_ptr = recv_topk_weights->data_or((float*)nullptr);
     }
     if (x_scales.has_value()) {
         recv_x_scales     = x_scales->ndim() == 1 ?
-                                Tensor({num_recv_tokens}, x_scales->dtype(), x_scales->device()) :
-                                Tensor({num_recv_tokens, num_scales}, x_scales->dtype(), x_scales->device());
+                                Tensor(ht_buffer.recv_x_scales.view(x_scales->dtype()), {num_recv_tokens}) :
+                                Tensor(ht_buffer.recv_x_scales.view(x_scales->dtype()), {num_recv_tokens, num_scales});
         recv_x_scales_ptr = recv_x_scales->data_or((float*)nullptr);
     }
 
@@ -795,7 +839,7 @@ Buffer::intranode_combine(const Tensor&                x,
         EP_HOST_ASSERT(topk_weights->dtype() == turbomind::kFloat32);
         num_topk              = static_cast<int>(topk_weights->shape(1));
         topk_weights_ptr      = topk_weights->data_or((float*)nullptr);
-        recv_topk_weights     = Tensor({num_recv_tokens, num_topk}, turbomind::kFloat32, turbomind::kDEVICE);
+        recv_topk_weights     = Tensor(ht_buffer.combined_topk_weights, {num_recv_tokens, num_topk});
         recv_topk_weights_ptr = recv_topk_weights->data_or((float*)nullptr);
     }
 
@@ -824,7 +868,7 @@ Buffer::intranode_combine(const Tensor&                x,
         }
 
     // Combine data
-    auto recv_x = Tensor({num_recv_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
+    auto recv_x = Tensor(ht_buffer.combined_x.view(x.dtype()), {num_recv_tokens, hidden});
     EP_HOST_ASSERT(num_channels * num_ranks * sizeof(int) * 2 +  // Queue head and tail
                        num_channels * num_ranks * config.num_max_nvl_chunked_recv_tokens * hidden * byte_size(x.dtype())
                        +  // Data buffer
@@ -911,14 +955,6 @@ Buffer::low_latency_dispatch(const Tensor&                x,
     auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
     // Allocate packed tensors
-    // auto packed_recv_x = Tensor({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
-    //                             use_fp8 ? turbomind::kFloat8_e4m3 : x.dtype(),
-    //                             turbomind::kDEVICE);
-
-    // auto packed_recv_src_info = Tensor(
-    //     {num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, turbomind::kInt32, turbomind::kDEVICE);
-    // auto packed_recv_layout_range = Tensor({num_local_experts, num_ranks}, turbomind::kInt64, turbomind::kDEVICE);
-    // auto packed_recv_count        = Tensor({num_local_experts}, turbomind::kInt32, turbomind::kDEVICE);
     auto packed_recv_x = Tensor(ll_buffer.packed_recv_x.view(use_fp8 ? turbomind::kFloat8_e4m3 : x.dtype()),
                                 {num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden});
     auto packed_recv_src_info =
@@ -936,20 +972,12 @@ Buffer::low_latency_dispatch(const Tensor&                x,
         // TODO: support unaligned cases
         EP_HOST_ASSERT(hidden % 512 == 0);
         if (not use_ue8m0) {
-            // packed_recv_x_scales =
-            //     Tensor({num_local_experts, hidden / 128, num_ranks * num_max_dispatch_tokens_per_rank},
-            //            turbomind::kFloat32,
-            //            turbomind::kDEVICE);
             packed_recv_x_scales =
                 Tensor(ll_buffer.packed_recv_x_scales,
                        {num_local_experts, hidden / 128, num_ranks * num_max_dispatch_tokens_per_rank});
         }
         else {
             EP_HOST_ASSERT(round_scale);
-            // packed_recv_x_scales =
-            //     Tensor({num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank},
-            //            turbomind::kInt32,
-            //            turbomind::kDEVICE);
             packed_recv_x_scales =
                 Tensor(ll_buffer.packed_recv_x_scales.view(turbomind::kInt32),
                        {num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank});
@@ -980,7 +1008,7 @@ Buffer::low_latency_dispatch(const Tensor&                x,
         reinterpret_cast<size_t>(buffer.dispatch_rdma_recv_data_buffer) - reinterpret_cast<size_t>(rdma_ll_buffer_ptr),
         reinterpret_cast<size_t>(buffer.dispatch_rdma_recv_count_buffer) - reinterpret_cast<size_t>(rdma_ll_buffer_ptr),
         reinterpret_cast<size_t>(buffer.dispatch_rdma_send_buffer) - reinterpret_cast<size_t>(rdma_ll_buffer_ptr),
-        x.raw_data(),
+        x.data_or((void*)nullptr),
         topk_idx.data<topk_idx_t>(),
         next_clean_meta.first,
         next_clean_meta.second,
@@ -1064,7 +1092,6 @@ Buffer::low_latency_combine(const Tensor&                x,
         combined_x = out.value();
     }
     else {
-        // combined_x = Tensor({num_combined_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
         combined_x = Tensor(ll_buffer.combined_x.view(x.dtype()), {num_combined_tokens, hidden});
     }
 
@@ -1149,6 +1176,7 @@ Buffer::internode_dispatch(const Tensor&                x,
                            const std::optional<Tensor>& cached_recv_gbl_rank_prefix_sum,
                            int                          expert_alignment,
                            int                          num_worst_tokens,
+                           const core::Buffer&          output,
                            const Config&                config)
 {
 
@@ -1259,7 +1287,7 @@ Buffer::internode_dispatch(const Tensor&                x,
     std::vector<int> num_recv_tokens_per_expert_list;
 
     // used to compute offsets in MoeFfnLayer
-    auto moe_recv_expert_counter_ten = Tensor({num_local_experts}, turbomind::kInt32, turbomind::kDEVICE);
+    auto moe_recv_expert_counter_ten = Tensor(ht_buffer.moe_recv_expert_counter, {num_local_experts});
 
     auto dev_comm     = comm->get_device_communicator(false);
     auto nccl_win     = comm->get_device_nccl_window(rdma_buffer_ptr);
@@ -1270,10 +1298,10 @@ Buffer::internode_dispatch(const Tensor&                x,
         EP_HOST_ASSERT(not cached_mode);
     }
     else {
-        rdma_channel_prefix_matrix = Tensor({num_rdma_ranks, num_channels}, turbomind::kInt32, turbomind::kDEVICE);
-        recv_rdma_rank_prefix_sum  = Tensor({num_rdma_ranks}, turbomind::kInt32, turbomind::kDEVICE);
-        gbl_channel_prefix_matrix  = Tensor({num_ranks, num_channels}, turbomind::kInt32, turbomind::kDEVICE);
-        recv_gbl_rank_prefix_sum   = Tensor({num_ranks}, turbomind::kInt32, turbomind::kDEVICE);
+        rdma_channel_prefix_matrix = Tensor(ht_buffer.rdma_channel_prefix_matrix, {num_rdma_ranks, num_channels});
+        recv_rdma_rank_prefix_sum  = Tensor(ht_buffer.recv_rdma_rank_prefix_sum, {num_rdma_ranks});
+        gbl_channel_prefix_matrix  = Tensor(ht_buffer.gbl_channel_prefix_matrix, {num_ranks, num_channels});
+        recv_gbl_rank_prefix_sum   = Tensor(ht_buffer.recv_gbl_rank_prefix_sum, {num_ranks});
 
         // Send sizes
         *moe_recv_counter = -1, *moe_recv_rdma_counter = -1;
@@ -1355,7 +1383,7 @@ Buffer::internode_dispatch(const Tensor&                x,
     }
 
     // Allocate new tensors
-    auto recv_x                          = Tensor({num_recv_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
+    auto recv_x                          = Tensor(output.view(x.dtype()), {num_recv_tokens, hidden});
     auto recv_topk_idx                   = std::optional<Tensor>();
     auto recv_topk_weights               = std::optional<Tensor>();
     auto recv_x_scales                   = std::optional<Tensor>();
@@ -1365,12 +1393,12 @@ Buffer::internode_dispatch(const Tensor&                x,
     auto send_rdma_head                  = std::optional<Tensor>();
     auto send_nvl_head                   = std::optional<Tensor>();
     if (not cached_mode) {
-        recv_src_meta =
-            Tensor({num_recv_tokens, internode::get_source_meta_bytes()}, turbomind::kUint8, turbomind::kDEVICE);
-        recv_rdma_channel_prefix_matrix = Tensor({num_rdma_ranks, num_channels}, turbomind::kInt32, turbomind::kDEVICE);
-        recv_gbl_channel_prefix_matrix  = Tensor({num_ranks, num_channels}, turbomind::kInt32, turbomind::kDEVICE);
-        send_rdma_head                  = Tensor({num_tokens, num_rdma_ranks}, turbomind::kInt32, turbomind::kDEVICE);
-        send_nvl_head = Tensor({num_rdma_recv_tokens, NUM_MAX_NVL_PEERS}, turbomind::kInt32, turbomind::kDEVICE);
+        recv_src_meta = Tensor(ht_buffer.recv_src_meta, {num_recv_tokens, internode::get_source_meta_bytes()});
+        recv_rdma_channel_prefix_matrix =
+            Tensor(ht_buffer.recv_rdma_channel_prefix_matrix, {num_rdma_ranks, num_channels});
+        recv_gbl_channel_prefix_matrix = Tensor(ht_buffer.recv_gbl_channel_prefix_matrix, {num_ranks, num_channels});
+        send_rdma_head                 = Tensor(ht_buffer.send_rdma_head, {num_tokens, num_rdma_ranks});
+        send_nvl_head                  = Tensor(ht_buffer.send_nvl_head, {num_rdma_recv_tokens, NUM_MAX_NVL_PEERS});
     }
 
     // Assign pointers
@@ -1378,15 +1406,16 @@ Buffer::internode_dispatch(const Tensor&                x,
     float*      recv_topk_weights_ptr = nullptr;
     float*      recv_x_scales_ptr     = nullptr;
     if (topk_idx.has_value()) {
-        recv_topk_idx         = Tensor({num_recv_tokens, num_topk}, topk_idx->dtype(), turbomind::kDEVICE);
-        recv_topk_weights     = Tensor({num_recv_tokens, num_topk}, topk_weights->dtype(), turbomind::kDEVICE);
+        recv_topk_idx = Tensor(ht_buffer.recv_topk_idx.view(topk_idx->dtype()), {num_recv_tokens, num_topk});
+        recv_topk_weights =
+            Tensor(ht_buffer.recv_topk_weights.view(topk_weights->dtype()), {num_recv_tokens, num_topk});
         recv_topk_idx_ptr     = recv_topk_idx->data_or((topk_idx_t*)nullptr);
         recv_topk_weights_ptr = recv_topk_weights->data_or((float*)nullptr);
     }
     if (x_scales.has_value()) {
         recv_x_scales     = x_scales->ndim() == 1 ?
-                                Tensor({num_recv_tokens}, x_scales->dtype(), turbomind::kDEVICE) :
-                                Tensor({num_recv_tokens, num_scales}, x_scales->dtype(), turbomind::kDEVICE);
+                                Tensor(ht_buffer.recv_x_scales.view(x_scales->dtype()), {num_recv_tokens}) :
+                                Tensor(ht_buffer.recv_x_scales.view(x_scales->dtype()), {num_recv_tokens, num_scales});
         recv_x_scales_ptr = recv_x_scales->data_or((float*)nullptr);
     }
 
@@ -1514,7 +1543,7 @@ Buffer::internode_combine(const Tensor&                x,
         EP_HOST_ASSERT(topk_weights->dtype() == turbomind::kFloat32);
         num_topk                  = static_cast<int>(topk_weights->shape(1));
         topk_weights_ptr          = topk_weights->data_or((float*)nullptr);
-        combined_topk_weights     = Tensor({num_combined_tokens, num_topk}, turbomind::kFloat32, turbomind::kDEVICE);
+        combined_topk_weights     = Tensor(ht_buffer.combined_topk_weights, {num_combined_tokens, num_topk});
         combined_topk_weights_ptr = combined_topk_weights->data_or((float*)nullptr);
     }
 
@@ -1568,7 +1597,7 @@ Buffer::internode_combine(const Tensor&                x,
         }
 
     // Launch data combine
-    auto combined_x = Tensor({num_combined_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
+    auto combined_x = Tensor(ht_buffer.combined_x.view(x.dtype()), {num_combined_tokens, hidden});
     internode::combine(CUDA_R_16BF,
                        combined_x.data_or((void*)nullptr),
                        combined_topk_weights_ptr,

@@ -17,6 +17,7 @@ namespace turbomind::comm {
 struct EpConfig {
     int num_nodes;
     int num_experts;
+    int experts_per_token;
     int hidden;
     int ht_max_tokens_per_rank;
     int ll_max_tokens_per_rank;
@@ -34,6 +35,7 @@ struct EpDispatchInput {
     core::Tensor&           x;
     core::Tensor_<float>&   topk_weights;
     core::Tensor_<int64_t>& topk_idx;
+    core::Buffer&           ht_buffer;
     int                     num_worst_tokens;
     bool                    use_fp8;
     bool                    output_scales;

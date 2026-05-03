@@ -50,9 +50,10 @@ void NcclCommImpl::InitializeEp(const EpConfig& config)
         false,
         false,
         qps_per_rank,
-        ep_config_.ll_max_tokens_per_rank,
+        ep_config_.ht_max_tokens_per_rank,
         ep_config_.ll_max_tokens_per_rank,
         ep_config_.num_experts,
+        ep_config_.experts_per_token,
         ep_config_.hidden,
         h_comm_);
 
@@ -229,6 +230,7 @@ void NcclCommImpl::Dispatch(const EpDispatchInput& input, EpDispatchOutput& outp
                                                                std::nullopt,
                                                                1,
                                                                input.num_worst_tokens,
+                                                               input.ht_buffer,
                                                                config);
             sync_check_cuda_error();
 
@@ -285,6 +287,7 @@ void NcclCommImpl::Dispatch(const EpDispatchInput& input, EpDispatchOutput& outp
                                                            std::nullopt,
                                                            1,
                                                            input.num_worst_tokens,
+                                                           input.ht_buffer,
                                                            config);
             sync_check_cuda_error();
 

@@ -21,6 +21,7 @@ public:
         const MoeFfnWeight* weights;
         float               scale;
         int                 max_tokens_per_rank;
+        Buffer              ht_buffer;
         int                 layer_id;
     };
 

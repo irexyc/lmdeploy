@@ -194,6 +194,11 @@ void UnifiedDecoder::Forward(int phase, TensorMap& args, const std::vector<Weigh
     auto& global_token_num     = layout.global_token_num;
     auto& ffn_input            = (is_warm_up_ || ep_size_ == 1) ? global_hidden_states : layout.partial_hidden_states;
 
+    Buffer ht_buffer;
+    if (d_comm_ && ep_size_ > 1) {
+        ht_buffer = args.at("symm_buf").buffer();
+    }
+
     const DataType dtype = local_residual.dtype();
 
     TM_DEBUG_TENSOR(local_residual, "res", 1);
@@ -273,6 +278,7 @@ void UnifiedDecoder::Forward(int phase, TensorMap& args, const std::vector<Weigh
                                                       weights.at(layer)->moe_weights.get(),
                                                       ffn_layer_ ? 1.f : 0.f,
                                                       layout.max_tokens_per_rank,
+                                                      ht_buffer,
                                                       layer};
             moe_ffn_layer_->Forward(*moe_fwd_param);
         }
