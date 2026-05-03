@@ -50,6 +50,10 @@ void NcclCommImpl::InitializeEp(const EpConfig& config)
         false,
         false,
         qps_per_rank,
+        ep_config_.ll_max_tokens_per_rank,
+        ep_config_.ll_max_tokens_per_rank,
+        ep_config_.num_experts,
+        ep_config_.hidden,
         h_comm_);
 
     temp_storage_bytes_ = 0;

@@ -18,6 +18,7 @@ struct EpConfig {
     int num_nodes;
     int num_experts;
     int hidden;
+    int ht_max_tokens_per_rank;
     int ll_max_tokens_per_rank;
 };
 

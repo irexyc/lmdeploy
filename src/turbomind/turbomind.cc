@@ -591,6 +591,7 @@ void TurboMind::Impl::CreateContext(int index)
             comm::EpConfig cfg{engine_param_.nnodes,  //
                                max_expert_num,
                                (int)model_param_.hidden_units,
+                               engine_param_.max_forward_token_num / tp_cp_size,
                                ll_max_tokens_per_rank};
             c.d_comm->InitializeEp(cfg);
         }

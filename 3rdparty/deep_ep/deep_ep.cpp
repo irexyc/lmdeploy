@@ -158,6 +158,10 @@ Buffer::Buffer(int      rank,
                bool     enable_shrink,
                bool     use_fabric,
                int      qps_per_rank,
+               int      num_max_tokens_per_rank_ht,
+               int      num_max_tokens_per_rank_ll,
+               int      num_experts,
+               int      hidden,
                HostComm h_comm):
     rank(rank),
     num_ranks(num_ranks),
@@ -231,6 +235,26 @@ Buffer::Buffer(int      rank,
     // RDMA
     if (num_rdma_bytes || num_ll_rdma_bytes) {
         allocate_rdma_buffer();
+    }
+
+    // Allocate buffer in advance
+    {
+        auto num_local_experts = num_experts / num_ranks;
+        ll_buffer.packed_recv_x =
+            turbomind::core::Buffer(num_local_experts * num_ranks * num_max_tokens_per_rank_ll * hidden,
+                                    turbomind::kBfloat16,
+                                    turbomind::kDEVICE);
+        ll_buffer.packed_recv_src_info = turbomind::core::Buffer(
+            num_local_experts * num_ranks * num_max_tokens_per_rank_ll, turbomind::kInt32, turbomind::kDEVICE);
+        ll_buffer.packed_recv_layout_range =
+            turbomind::core::Buffer(num_local_experts * num_ranks, turbomind::kInt64, turbomind::kDEVICE);
+        ll_buffer.packed_recv_count = turbomind::core::Buffer(num_local_experts, turbomind::kInt32, turbomind::kDEVICE);
+        ll_buffer.packed_recv_x_scales =
+            turbomind::core::Buffer(num_local_experts * hidden / 128 * num_ranks * num_max_tokens_per_rank_ll,
+                                    turbomind::kFloat32,
+                                    turbomind::kDEVICE);
+        ll_buffer.combined_x =
+            turbomind::core::Buffer(num_max_tokens_per_rank_ll * hidden, turbomind::kBfloat16, turbomind::kDEVICE);
     }
 
     turbomind::core::Context::stream().Sync();
@@ -887,14 +911,20 @@ Buffer::low_latency_dispatch(const Tensor&                x,
     auto next_buffer = layout.buffers[low_latency_buffer_idx ^= 1];
 
     // Allocate packed tensors
-    auto packed_recv_x = Tensor({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
-                                use_fp8 ? turbomind::kFloat8_e4m3 : x.dtype(),
-                                turbomind::kDEVICE);
+    // auto packed_recv_x = Tensor({num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden},
+    //                             use_fp8 ? turbomind::kFloat8_e4m3 : x.dtype(),
+    //                             turbomind::kDEVICE);
 
-    auto packed_recv_src_info = Tensor(
-        {num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, turbomind::kInt32, turbomind::kDEVICE);
-    auto packed_recv_layout_range = Tensor({num_local_experts, num_ranks}, turbomind::kInt64, turbomind::kDEVICE);
-    auto packed_recv_count        = Tensor({num_local_experts}, turbomind::kInt32, turbomind::kDEVICE);
+    // auto packed_recv_src_info = Tensor(
+    //     {num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank}, turbomind::kInt32, turbomind::kDEVICE);
+    // auto packed_recv_layout_range = Tensor({num_local_experts, num_ranks}, turbomind::kInt64, turbomind::kDEVICE);
+    // auto packed_recv_count        = Tensor({num_local_experts}, turbomind::kInt32, turbomind::kDEVICE);
+    auto packed_recv_x = Tensor(ll_buffer.packed_recv_x.view(use_fp8 ? turbomind::kFloat8_e4m3 : x.dtype()),
+                                {num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank, hidden});
+    auto packed_recv_src_info =
+        Tensor(ll_buffer.packed_recv_src_info, {num_local_experts, num_ranks * num_max_dispatch_tokens_per_rank});
+    auto packed_recv_layout_range = Tensor(ll_buffer.packed_recv_layout_range, {num_local_experts, num_ranks});
+    auto packed_recv_count        = Tensor(ll_buffer.packed_recv_count, {num_local_experts});
 
     // Allocate column-majored scales
     auto  packed_recv_x_scales     = std::optional<Tensor>();
@@ -906,17 +936,23 @@ Buffer::low_latency_dispatch(const Tensor&                x,
         // TODO: support unaligned cases
         EP_HOST_ASSERT(hidden % 512 == 0);
         if (not use_ue8m0) {
+            // packed_recv_x_scales =
+            //     Tensor({num_local_experts, hidden / 128, num_ranks * num_max_dispatch_tokens_per_rank},
+            //            turbomind::kFloat32,
+            //            turbomind::kDEVICE);
             packed_recv_x_scales =
-                Tensor({num_local_experts, hidden / 128, num_ranks * num_max_dispatch_tokens_per_rank},
-                       turbomind::kFloat32,
-                       turbomind::kDEVICE);
+                Tensor(ll_buffer.packed_recv_x_scales,
+                       {num_local_experts, hidden / 128, num_ranks * num_max_dispatch_tokens_per_rank});
         }
         else {
             EP_HOST_ASSERT(round_scale);
+            // packed_recv_x_scales =
+            //     Tensor({num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank},
+            //            turbomind::kInt32,
+            //            turbomind::kDEVICE);
             packed_recv_x_scales =
-                Tensor({num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank},
-                       turbomind::kInt32,
-                       turbomind::kDEVICE);
+                Tensor(ll_buffer.packed_recv_x_scales.view(turbomind::kInt32),
+                       {num_local_experts, hidden / 512, num_ranks * num_max_dispatch_tokens_per_rank});
         }
         packed_recv_x_scales     = packed_recv_x_scales->transpose(1, 2);
         packed_recv_x_scales_ptr = packed_recv_x_scales->data_or((float*)nullptr);
@@ -1028,7 +1064,8 @@ Buffer::low_latency_combine(const Tensor&                x,
         combined_x = out.value();
     }
     else {
-        combined_x = Tensor({num_combined_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
+        // combined_x = Tensor({num_combined_tokens, hidden}, x.dtype(), turbomind::kDEVICE);
+        combined_x = Tensor(ll_buffer.combined_x.view(x.dtype()), {num_combined_tokens, hidden});
     }
 
     // Kernel launch

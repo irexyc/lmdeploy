@@ -114,6 +114,18 @@ public:
     volatile int* moe_recv_rdma_counter        = nullptr;
     int*          moe_recv_rdma_counter_mapped = nullptr;
 
+    // HT Buffer
+
+    // LL Buffer
+    struct {
+        turbomind::core::Buffer packed_recv_x;
+        turbomind::core::Buffer packed_recv_src_info;
+        turbomind::core::Buffer packed_recv_layout_range;
+        turbomind::core::Buffer packed_recv_count;
+        turbomind::core::Buffer packed_recv_x_scales;
+        turbomind::core::Buffer combined_x;
+    } ll_buffer;
+
     shared_memory::SharedMemoryAllocator shared_memory_allocator;
 
     Buffer(int      rank,  //
@@ -125,6 +137,10 @@ public:
            bool     enable_shrink,
            bool     use_fabric,
            int      qps_per_rank,
+           int      num_max_tokens_per_rank_ht,
+           int      num_max_tokens_per_rank_ll,
+           int      num_experts,
+           int      hidden,
            HostComm h_comm);
 
     Buffer(): shared_memory_allocator{false} {};
