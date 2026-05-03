@@ -239,7 +239,7 @@ Buffer::Buffer(int      rank,
     {
         const auto num_local_experts    = num_experts / num_ranks;
         const auto max_recv_tokens      = (int64_t)num_max_tokens_per_rank_ht * num_ranks;
-        const auto max_rdma_recv_tokens = (int64_t)num_max_tokens_per_rank_ht * num_rdma_ranks;
+        const auto max_rdma_recv_tokens = (int64_t)num_max_tokens_per_rank_ht * num_ranks;
         const auto max_num_scales       = ceil_div<int64_t>(hidden, 128);
 
         ht_buffer.moe_recv_expert_counter =
