@@ -1,233 +1,204 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-"""Qwen3.5 TextModel for the new pipeline."""
+"""Qwen3.5 TextModel — text path inherited, visual path added.
+
+Loads ``Qwen3_5ForConditionalGeneration`` checkpoints whose top-level
+HF config carries a ``vision_config`` block. Reuses ``_Qwen3_5Model``
+verbatim for the language model and adds a visual sub-tree rooted at
+``ModelRoot.visual_model``.
+
+The patcher and position embedding are replicated across TP ranks. Visual
+transformer blocks and merger linears shard with the model TP group.
+"""
 from __future__ import annotations
 
-import re
-
 import _turbomind as _tm
-from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
+from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
 
 from ..builders import (
     AttentionBuilder,
-    DecoderLayerBuilder,
-    DecoderLayerConfig,
-    DeltaNetBuilder,
-    FfnBuilder,
+    Builder,
+    LayerNormBuilder,
     ModuleListBuilder,
     ModuleListConfig,
-    MoeBuilder,
-    TextModelBuilder,
-    _act_type_id,
+    SplitSide,
+    VisualModelBuilder,
+    make_layer_norm_config,
 )
-from ..builders.attention import split_output_gate
-from ..text_model import TextModel
+from ..linear import transform_output_dim
 from .base import INPUT_MODELS
-from .utils import (
-    layer_progress,
-    make_attention_config,
-    make_ffn_config,
-    make_model_weight_config,
-    make_moe_config,
-    read_packed_moe_expert,
-    reorder_rotary_emb,
-)
+from ._qwen3_5 import _Qwen3_5Model
+from .utils import layer_progress
 
 
-def map_packed_qwen35_experts(name: str) -> str:
-    """Map packed expert names to weight names so parameter.py can classify."""
-    return re.sub(r'(mlp\.experts\.(?:gate_up|down)_proj)$', r'\1.weight', name)
+@transform_output_dim
+def _split_packed_visual_qkv(qkv):
+    """Split HF visual QKV layout [Q | K | V] along output dim."""
+    return tuple(x.contiguous() for x in qkv.chunk(3, dim=-1))
 
 
-@INPUT_MODELS.register_module(name='qwen3_5-moe')
 @INPUT_MODELS.register_module(name='qwen3_5')
-class Qwen3_5Model(TextModel):
-    """Weight model for Qwen3.5 (dense + linear-attn + optional MoE)."""
+@INPUT_MODELS.register_module(name='qwen3_5-moe')
+class Qwen3_5Model(_Qwen3_5Model):
+    """Weight model for Qwen3.5 VLM (text + vision)."""
 
-    _loader_mappings = [map_packed_qwen35_experts]
-    cfg: Qwen3_5TextConfig | Qwen3_5MoeTextConfig
+    _vision = True
 
-    def __init__(self, cfg: Qwen3_5TextConfig | Qwen3_5MoeTextConfig, *, resolver):
-        super().__init__(cfg, resolver=resolver)
+    def __init__(self, cfg: Qwen3_5Config | Qwen3_5MoeConfig, *, resolver):
+        text_cfg = cfg.text_config
+        if text_cfg is None:
+            raise ValueError(
+                'Qwen3_5Model requires a checkpoint with text_config.')
 
-        self._attn_cfg = make_attention_config(cfg)
-        self._attn_cfg.output_gate = True
+        vision_cfg = cfg.vision_config
+        if vision_cfg is None:
+            raise ValueError(
+                'Qwen3_5Model requires a checkpoint with vision_config; '
+                'got none. Set disable_vision_encoder=True for text-only checkpoints.')
 
-        self._n_experts = getattr(cfg, 'num_experts', 0)
+        super().__init__(text_cfg, resolver=resolver)
 
-        # ---- DeltaNet template ----
-        ln_key_heads = cfg.linear_num_key_heads
-        ln_val_heads = cfg.linear_num_value_heads
-        ln_key_dim   = cfg.linear_key_head_dim
-        ln_val_dim   = cfg.linear_value_head_dim
+        self._vis_depth = int(vision_cfg.depth)
+        self._vis_hidden = int(vision_cfg.hidden_size)
+        self._vis_inter = int(vision_cfg.intermediate_size)
+        self._vis_heads = int(vision_cfg.num_heads)
+        self._vis_out_hidden = int(vision_cfg.out_hidden_size)
+        self._vis_in_chans = int(vision_cfg.in_channels)
+        self._vis_patch = int(vision_cfg.patch_size)
+        self._vis_temporal = int(vision_cfg.temporal_patch_size)
+        self._vis_pos_n = int(vision_cfg.num_position_embeddings)
+        self._vis_spatial_merge = int(vision_cfg.spatial_merge_size)
+        self._vis_norm_eps = 1e-6
 
-        self._dn_cfg = _tm.DeltaNetConfig()
-        self._dn_cfg.hidden_dim      = self.cfg.hidden_size
-        self._dn_cfg.num_k_heads     = ln_key_heads
-        self._dn_cfg.num_v_heads     = ln_val_heads
-        self._dn_cfg.key_head_dim    = ln_key_dim
-        self._dn_cfg.value_head_dim  = ln_val_dim
-        self._dn_cfg.d_conv          = cfg.linear_conv_kernel_dim or 4
-        q_dim = ln_key_heads * ln_key_dim
-        v_dim = ln_val_heads * ln_val_dim
-        self._linear_qkv_split = (q_dim, q_dim, v_dim)
-
-        # ---- MoE template ----
-        if self._n_experts > 0:
-            self._moe_cfg = make_moe_config(
-                cfg,
-                experts_per_token=cfg.num_experts_per_tok)
-            self._moe_cfg.expert_num = self._n_experts
-            inter_size=cfg.moe_intermediate_size
-        else:
-            inter_size=cfg.intermediate_size
-
-        # ---- FFN template ----
-        self._ffn_cfg = make_ffn_config(
-            cfg,
-            act_type=_act_type_id('silu'), inter_size=inter_size)
+        # in_dim of the patcher when the Conv3d is reinterpreted as a
+        # Linear over flattened patches: C * T * H * W.
+        self._patch_in_dim = (self._vis_in_chans
+                              * self._vis_temporal
+                              * self._vis_patch
+                              * self._vis_patch)
 
     # ------------------------------------------------------------------
-    # model() — same topology as old code
+    # model() — extend the parent text build with the visual sub-tree
     # ------------------------------------------------------------------
 
     def model(self):
-        root_cfg = make_model_weight_config(self.cfg)
-        root = TextModelBuilder(
-            root_cfg, self._ctx,
-            root_handles=self._root_handles,
-            tp=self._model_tp,
-            vocab_size=self.cfg.vocab_size)
-        embed_key = 'model.language_model.embed_tokens.weight'
-        root.add_token_embeds(self._get(embed_key))
-        root.norm = self.norm(1.0 + self._get('model.language_model.norm.weight'))
-        lm_key = embed_key if self.cfg.tie_word_embeddings else 'lm_head.weight'
-        root.add_lm_head(self._linear(lm_key.removesuffix('.weight')))
-        root.layers = self.layers('model.language_model.layers')
+        super().model()             # builds text_model under ModelRoot
+        self._build_visual_model()  # builds visual_model under ModelRoot
+
+    # ------------------------------------------------------------------
+    # Visual sub-tree
+    # ------------------------------------------------------------------
+
+    def _build_visual_model(self):
+        # The patcher weight in HF is a Conv3d (out, in_chans, T, H, W).
+        # Flatten it to a 2D linear weight (out, in_chans·T·H·W) so it
+        # passes through the standard TrivialFormat normaliser. This is
+        # mathematically equivalent because the patcher uses
+        # non-overlapping patches (stride == kernel size in T, H, W).
+        pe_key = 'model.visual.patch_embed.proj.weight'
+        if pe_key in self.params:
+            w = self.params[pe_key]
+            if w.dim() == 5:
+                self.params[pe_key] = w.reshape(
+                    self._vis_hidden, -1).contiguous()
+
+        cfg = self._make_visual_root_cfg()
+        root = VisualModelBuilder(
+            cfg, self._ctx, root_handles=self._root_handles)
+        root.tp = self._model_tp
+
+        root._add_tensor('pos_embed', self._get(
+            'model.visual.pos_embed.weight'))
+        root._add_linear('patch_embed', self._linear(
+            'model.visual.patch_embed.proj'))
+
+        root.blocks = self.vit_blocks('model.visual.blocks')
+
+        # Merger
+        root._add_linear('merger_fc1', self._linear(
+            'model.visual.merger.linear_fc1'), SplitSide.OUTPUT)
+        root._add_linear('merger_fc2', self._linear(
+            'model.visual.merger.linear_fc2'), SplitSide.INPUT)
+        root.merger_norm = self._layer_norm('model.visual.merger.norm',
+                                            dim=self._vis_hidden)
+
         root.build()
 
-    # ------------------------------------------------------------------
-    # Attention / linear-attention factories
-    # ------------------------------------------------------------------
+    def _make_visual_root_cfg(self):
+        cfg = _tm.Qwen3_5VitWeightConfig()
+        cfg.data_type = self._resolver.data_type
+        cfg.hidden_dim = self._vis_hidden
+        cfg.out_hidden_dim = self._vis_out_hidden
+        cfg.depth = self._vis_depth
+        cfg.head_num = self._vis_heads
+        cfg.intermediate_size = self._vis_inter
+        cfg.patch_in_dim = self._patch_in_dim
+        cfg.num_position_embeddings = self._vis_pos_n
+        cfg.spatial_merge_size = self._vis_spatial_merge
+        cfg.norm_eps = self._vis_norm_eps
+        return cfg
 
-    def attn(self, pfx):
-        q, k, v, o = [self._linear(f'{pfx}.{x}_proj') for x in 'qkvo']
+    def vit_blocks(self, pfx: str):
+        blocks = ModuleListBuilder(ModuleListConfig(), self._ctx)
 
-        cfg = self._attn_cfg.clone()
-        q, gate = split_output_gate(q, head_num=cfg.head_num)
+        for i in layer_progress(self._vis_depth):
+            blocks[i] = self.vit_block(f'{pfx}.{i}')
 
-        def reorder(x):
-            return reorder_rotary_emb(x, cfg.head_dim, cfg.rope.dim, resolver=self._resolver)
+        return blocks.build()
 
-        q, k = [reorder(x) for x in (q, k)]
+    def vit_block(self, pfx: str):
+        cfg = _tm.Qwen3_5VitBlockConfig()
+        cfg.data_type = self._resolver.data_type
+        cfg.hidden_dim = self._vis_hidden
+        cfg.head_num = self._vis_heads
+        cfg.intermediate_size = self._vis_inter
+        cfg.norm_eps = self._vis_norm_eps
 
-        m = AttentionBuilder(cfg, self._ctx, tp=self._attn_tp)
+        b = Builder(cfg, self._ctx)
+        b.tp = self._model_tp
 
-        m.add_qkv_proj(q, k, v, gate=gate)
-        m.add_o_proj(o)
+        b.norm1 = self._layer_norm(f'{pfx}.norm1', dim=self._vis_hidden)
+        b.norm2 = self._layer_norm(f'{pfx}.norm2', dim=self._vis_hidden)
 
-        q_norm, k_norm = [self._get(f'{pfx}.{x}_norm.weight') for x in 'qk']
+        b.attention = self.vit_attn(f'{pfx}.attn')
+        b._add_linear('mlp_fc1', self._linear(
+            f'{pfx}.mlp.linear_fc1'), SplitSide.OUTPUT)
+        b._add_linear('mlp_fc2', self._linear(
+            f'{pfx}.mlp.linear_fc2'), SplitSide.INPUT)
+        return b.build()
 
-        m.q_norm = self.norm(reorder(1.0 + q_norm.float()))
-        m.k_norm = self.norm(reorder(1.0 + k_norm.float()))
+    def _make_visual_attn_cfg(self):
+        cfg = _tm.AttentionConfig()
+        cfg.data_type = self._resolver.data_type
+        cfg.hidden_dim = self._vis_hidden
+        cfg.head_dim = self._vis_hidden // self._vis_heads
+        cfg.head_num = self._vis_heads
+        cfg.kv_head_num = self._vis_heads
+        cfg.window_size = 0
+        cfg.softmax_scale = 0.0
+        return cfg
 
+    def vit_attn(self, pfx: str):
+        cfg = self._make_visual_attn_cfg()
+        q, k, v = _split_packed_visual_qkv(self._linear(f'{pfx}.qkv'))
+
+        # Qwen3.5 ViT applies RoPE before invoking the attention kernel, so
+        # Q/K must keep HF order here rather than using text rotary reorder.
+        m = AttentionBuilder(cfg, self._ctx, tp=self._model_tp)
+        m.add_qkv_proj(q, k, v)
+        m.add_o_proj(self._linear(f'{pfx}.proj'))
         return m.build()
 
-    def linear_attn(self, pfx):
-        cfg = self._dn_cfg.clone()
-        builder = DeltaNetBuilder(cfg, self._ctx,
-                                  tp=self._attn_tp)
-
-        builder.add_input_projections(
-            in_proj_qkv=self._linear(f'{pfx}.in_proj_qkv'),
-            in_proj_z=self._linear(f'{pfx}.in_proj_z'),
-            in_proj_b=self._linear(f'{pfx}.in_proj_b'),
-            in_proj_a=self._linear(f'{pfx}.in_proj_a'),
-            out_proj=self._linear(f'{pfx}.out_proj'),
-            qkv_split=self._linear_qkv_split)
-        builder.add_scalar_params(
-            a_log=self._get(f'{pfx}.A_log'),
-            dt_bias=self._get(f'{pfx}.dt_bias'))
-        builder.add_conv1d(
-            self._get(f'{pfx}.conv1d.weight'),
-            qkv_split=self._linear_qkv_split)
-        builder.norm = self.norm(self._get(f'{pfx}.norm.weight'))  # ! not zero-centered
-        return builder.build()
-
     # ------------------------------------------------------------------
-    # FFN / MoE factories
+    # Helper: build a LayerNorm child
     # ------------------------------------------------------------------
 
-    def ffn(self, pfx, inter_size, is_expert=False):
-        try:
-            w1, w3, w2 = [self._linear(f'{pfx}.{x}_proj')
-                          for x in ('gate', 'up', 'down')]
-        except KeyError:
-            return None
-
-        cfg = self._ffn_cfg.clone()
-        cfg.inter_size = inter_size
-        cfg.is_expert  = is_expert
-
-        m = FfnBuilder(cfg, self._ctx, tp=self._mlp_tp)
-        m.add_ffn(w1, w2, w3)
+    def _layer_norm(self, pfx: str, *, dim: int):
+        weight = self._get(f'{pfx}.weight')
+        bias = self._get(f'{pfx}.bias')
+        cfg = make_layer_norm_config(dim=dim,
+                                     data_type=self._resolver.data_type,
+                                     norm_eps=self._vis_norm_eps)
+        m = LayerNormBuilder(cfg, self._ctx)
+        m.set_weight(weight, bias=bias)
         return m.build()
-
-    def moe(self, pfx):
-        cfg = self._moe_cfg.clone()
-
-        m = MoeBuilder(cfg, self._ctx)
-
-        m.add_gate('gate', self._linear(f'{pfx}.gate'))
-
-        experts = ModuleListBuilder(ModuleListConfig(), self._ctx)
-        for e in range(self._n_experts):
-            experts[e] = self._moe_expert_ffn(f'{pfx}.experts', e, self.cfg.moe_intermediate_size)
-        m.experts = experts.build()
-
-        m.add_gate('shared_gate', self._linear(f'{pfx}.shared_expert_gate'))
-        shared = self.ffn(f'{pfx}.shared_expert', self.cfg.shared_expert_intermediate_size)
-
-        return m.build(), shared
-
-    def _packed_moe_ffn(self, pfx, expert_idx, inter_size):
-        w1, w2, w3 = read_packed_moe_expert(
-            self.params,
-            f'{pfx}.gate_up_proj',
-            f'{pfx}.down_proj',
-            expert_idx,
-            resolver=self._resolver,
-        )
-        cfg = self._ffn_cfg.clone()
-        cfg.inter_size = inter_size
-        cfg.is_expert  = True
-        m = FfnBuilder(cfg, self._ctx, tp=self._mlp_tp)
-        m.add_ffn(w1, w2, w3)
-        return m.build()
-
-    def _moe_expert_ffn(self, pfx, expert_idx, inter_size):
-        expert_pfx = f'{pfx}.{expert_idx}'
-        inter_size = self.cfg.moe_intermediate_size
-        return (self.ffn(expert_pfx, inter_size, is_expert=True)
-                or self._packed_moe_ffn(pfx, expert_idx, inter_size))
-
-    # ------------------------------------------------------------------
-    # layers() — dispatch by layer type
-    # ------------------------------------------------------------------
-
-    def layers(self, pfx):
-        layers = ModuleListBuilder(ModuleListConfig(), self._ctx)
-        for i in layer_progress(self.cfg.num_hidden_layers):
-            d = DecoderLayerBuilder(DecoderLayerConfig(), self._ctx)
-            if self.cfg.layer_types[i] == 'linear_attention':
-                d.linear_attn = self.linear_attn(f'{pfx}.{i}.linear_attn')
-            else:
-                d.attention = self.attn(f'{pfx}.{i}.self_attn')
-            if self._n_experts > 0:
-                d.moe_ffn, d.feed_forward = self.moe(f'{pfx}.{i}.mlp')
-            else:
-                d.feed_forward = self.ffn(f'{pfx}.{i}.mlp', self.cfg.intermediate_size)
-            d.attention_norm = self.norm(1.0 + self._get(f'{pfx}.{i}.input_layernorm.weight').float())
-            d.ffn_norm = self.norm(1.0 + self._get(f'{pfx}.{i}.post_attention_layernorm.weight').float())
-            layers[i] = d.build()
-        return layers.build()

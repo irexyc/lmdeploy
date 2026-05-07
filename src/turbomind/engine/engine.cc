@@ -56,14 +56,15 @@ struct Engine::Impl {
     using Requests = vector<shared_ptr<Request>>;
     using Signal   = std::function<void()>;
 
-    Impl(EngineParam        param,
-         LanguageModel      model,
-         const ModelWeight& weights,
-         Context&           ctx,
-         Gateway&           gateway,
-         int                device_id,
-         int                queue_id,
-         int                phases);
+    Impl(EngineParam                  param,
+         LanguageModel                model,
+         std::unique_ptr<VisualModel> visual_model,
+         const ModelWeight&           weights,
+         Context&                     ctx,
+         Gateway&                     gateway,
+         int                          device_id,
+         int                          queue_id,
+         int                          phases);
 
     void CreateSequenceManager();
 
@@ -128,9 +129,10 @@ struct Engine::Impl {
     Queue<unique_ptr<BatchData>> inbound_;
     Queue<unique_ptr<BatchData>> outbound_;
 
-    LanguageModel      model_;
-    const ModelWeight& weights_;
-    ModelExecutor      executor_;
+    LanguageModel                model_;
+    std::unique_ptr<VisualModel> visual_model_;  // null for text-only models
+    const ModelWeight&           weights_;
+    ModelExecutor                executor_;
 
     std::thread internal_thread_;
 
@@ -175,14 +177,15 @@ Engine::Impl::~Impl()
     executor_ = {};
 }
 
-Engine::Impl::Impl(EngineParam        param,
-                   LanguageModel      model,
-                   const ModelWeight& weights,
-                   Context&           ctx,
-                   Gateway&           gateway,
-                   int                device_id,
-                   int                queue_id,
-                   int                phases):
+Engine::Impl::Impl(EngineParam                  param,
+                   LanguageModel                model,
+                   std::unique_ptr<VisualModel> visual_model,
+                   const ModelWeight&           weights,
+                   Context&                     ctx,
+                   Gateway&                     gateway,
+                   int                          device_id,
+                   int                          queue_id,
+                   int                          phases):
     param_{param},
     gateway_{gateway},
     tp_group_{ctx.comm.h_tp_group},
@@ -195,6 +198,7 @@ Engine::Impl::Impl(EngineParam        param,
     async_{phases > 1},
     is_warm_up_{*ctx.is_warm_up},
     model_{std::move(model)},
+    visual_model_{std::move(visual_model)},
     weights_{weights}
 {
     states_.emplace_back();
@@ -203,7 +207,7 @@ Engine::Impl::Impl(EngineParam        param,
         data_.emplace_back();
     }
 
-    executor_ = ModelExecutor{model_, ctx, device_id_, outbound_, inbound_};
+    executor_ = ModelExecutor{model_, visual_model_.get(), ctx, device_id_, outbound_, inbound_};
 
     CreateSequenceManager();  // initializes `session_len_trunc_`
 
@@ -910,15 +914,17 @@ Engine::Engine()                  = default;
 Engine::Engine(Engine&&) noexcept = default;
 Engine& Engine::operator=(Engine&&) noexcept = default;
 
-Engine::Engine(EngineParam        param,
-               LanguageModel      model,
-               const ModelWeight& weights,
-               Context&           ctx,
-               Gateway&           gateway,
-               int                device_id,
-               int                dp_rank,
-               int                phases):
-    impl_{std::make_unique<Impl>(param, std::move(model), weights, ctx, gateway, device_id, dp_rank, phases)}
+Engine::Engine(EngineParam                  param,
+               LanguageModel                model,
+               std::unique_ptr<VisualModel> visual_model,
+               const ModelWeight&           weights,
+               Context&                     ctx,
+               Gateway&                     gateway,
+               int                          device_id,
+               int                          dp_rank,
+               int                          phases):
+    impl_{std::make_unique<Impl>(
+        param, std::move(model), std::move(visual_model), weights, ctx, gateway, device_id, dp_rank, phases)}
 {
 }
 

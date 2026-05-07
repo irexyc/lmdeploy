@@ -28,6 +28,10 @@
 #include "src/turbomind/models/model_weight.h"
 #include "src/turbomind/models/moe_weight.h"
 #include "src/turbomind/models/norm_weight.h"
+#include "src/turbomind/models/layer_norm_weight.h"
+#include "src/turbomind/models/qwen3_5vit/qwen3_5vit_block_weight.h"
+#include "src/turbomind/models/qwen3_5vit/qwen3_5vit_weight.h"
+#include "src/turbomind/models/visual_model_weight.h"
 #include "src/turbomind/python/dlpack.h"
 #include "src/turbomind/turbomind.h"
 #include "src/turbomind/utils/cuda_utils.h"
@@ -458,6 +462,9 @@ PYBIND11_MODULE(_turbomind, m)
     bind_config<turbomind::core::NormConfig>(m, "NormConfig");
     bind_config<turbomind::core::DecoderLayerConfig>(m, "DecoderLayerConfig");
     bind_config<turbomind::core::ModelWeightConfig>(m, "ModelWeightConfig");
+    bind_config<turbomind::core::LayerNormConfig>(m, "LayerNormConfig");
+    bind_config<turbomind::core::Qwen3_5VitWeightConfig>(m, "Qwen3_5VitWeightConfig");
+    bind_config<turbomind::core::Qwen3_5VitBlockConfig>(m, "Qwen3_5VitBlockConfig");
 
     // tensor
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")

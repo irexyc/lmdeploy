@@ -9,7 +9,6 @@ import _turbomind as _tm
 import torch
 
 from lmdeploy.archs import get_model_arch
-from lmdeploy.utils import get_logger
 
 from ..builders import _act_type_id
 from ..linear import Linear, _dequant_linear

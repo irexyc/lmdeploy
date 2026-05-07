@@ -9,6 +9,7 @@
 #include "src/turbomind/engine/batch.h"
 #include "src/turbomind/models/language_model.h"
 #include "src/turbomind/models/llama/llama_utils.h"
+#include "src/turbomind/models/visual_model.h"
 #include "src/turbomind/utils/anomaly_handler.h"
 
 // #include "dbg.h"
@@ -21,6 +22,7 @@ using std::unique_ptr;
 struct ModelExecutor::Impl {
 
     LanguageModel& model_;
+    VisualModel*   visual_model_;  // nullable
     LlamaLinear&   linear_;
 
     const int device_id_;
@@ -76,11 +78,17 @@ struct ModelExecutor::Impl {
     }
 
     Impl(LanguageModel&                model,
+         VisualModel*                  visual_model,
          Context&                      context,
          int                           device_id,
          Queue<unique_ptr<BatchData>>& inbound,
          Queue<unique_ptr<BatchData>>& outbound):
-        model_{model}, linear_{*context.linear}, device_id_{device_id}, inbound_{inbound}, outbound_{outbound}
+        model_{model},
+        visual_model_{visual_model},
+        linear_{*context.linear},
+        device_id_{device_id},
+        inbound_{inbound},
+        outbound_{outbound}
     {
     }
 
@@ -104,11 +112,13 @@ ModelExecutor::ModelExecutor(ModelExecutor&&) noexcept = default;
 ModelExecutor& ModelExecutor::operator=(ModelExecutor&&) noexcept = default;
 
 ModelExecutor::ModelExecutor(LanguageModel&                model,
+                             VisualModel*                  visual_model,
                              Context&                      context,
                              int                           device_id,
                              Queue<unique_ptr<BatchData>>& inbound,
                              Queue<unique_ptr<BatchData>>& outbound):
-    impl_{std::make_unique<Impl>(model, context, device_id, inbound, outbound)}
+    impl_{std::make_unique<Impl>(model, //
+        visual_model, context, device_id, inbound, outbound)}
 {
 }
 
