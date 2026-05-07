@@ -6,6 +6,7 @@ add_library(models STATIC
         output_processor.cc
         linear_weight.cc
         norm_weight.cc
+        layer_norm_weight.cc
         attention_weight.cc
         ffn_weight.cc
         moe_weight.cc
@@ -13,6 +14,10 @@ add_library(models STATIC
         decoder_layer_weight.cc
         model_weight.cc
         model_root.cc
+        visual_model.cc
+        qwen3_5vit/qwen3_5vit_block_weight.cc
+        qwen3_5vit/qwen3_5vit_weight.cc
+        qwen3_5vit/qwen3_5vit.cc
         llama/LlamaLinear.cu
         llama/BlockManager.cc
         llama/BlockTrie.cc
