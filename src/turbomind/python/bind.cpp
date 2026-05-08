@@ -20,6 +20,7 @@
 #include "src/turbomind/core/tensor.h"
 #include "src/turbomind/engine/engine_config.h"
 #include "src/turbomind/engine/model_request.h"
+#include "src/turbomind/engine/multimodal_input.h"
 #include "src/turbomind/models/attention_weight.h"
 #include "src/turbomind/models/decoder_layer_weight.h"
 #include "src/turbomind/models/delta_net_weight.h"
@@ -27,7 +28,6 @@
 #include "src/turbomind/models/layer_norm_weight.h"
 #include "src/turbomind/models/linear_weight.h"
 #include "src/turbomind/models/model_weight.h"
-#include "src/turbomind/engine/multimodal_input.h"
 #include "src/turbomind/models/moe_weight.h"
 #include "src/turbomind/models/norm_weight.h"
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_block_weight.h"
@@ -313,6 +313,9 @@ Value py_to_value(py::handle obj)
         return Value{obj.cast<double>()};
     if (py::isinstance<py::str>(obj))
         return Value{obj.cast<std::string>()};
+    if (py::isinstance(obj, py::module_::import("enum").attr("Enum"))) {
+        return py_to_value(obj.attr("value"));
+    }
 
     if (py::isinstance<py::list>(obj) || py::isinstance<py::tuple>(obj)) {
         Array list;
