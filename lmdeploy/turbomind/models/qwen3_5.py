@@ -125,7 +125,7 @@ class Qwen3_5Model(_Qwen3_5Model):
         root.build()
 
     def _make_visual_root_cfg(self):
-        cfg = _tm.Qwen3_5VitWeightConfig()
+        cfg = _tm.Qwen3_5VitConfig()
         cfg.data_type = self._resolver.data_type
         cfg.hidden_dim = self._vis_hidden
         cfg.out_hidden_dim = self._vis_out_hidden
@@ -133,6 +133,9 @@ class Qwen3_5Model(_Qwen3_5Model):
         cfg.head_num = self._vis_heads
         cfg.intermediate_size = self._vis_inter
         cfg.patch_in_dim = self._patch_in_dim
+        cfg.in_channels = self._vis_in_chans
+        cfg.patch_size = self._vis_patch
+        cfg.temporal_patch_size = self._vis_temporal
         cfg.num_position_embeddings = self._vis_pos_n
         cfg.spatial_merge_size = self._vis_spatial_merge
         cfg.norm_eps = self._vis_norm_eps

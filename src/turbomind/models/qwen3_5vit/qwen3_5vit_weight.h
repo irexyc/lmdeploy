@@ -13,9 +13,9 @@ namespace turbomind::core {
 /// C++ runtime needs to allocate kernels later (depth, head_num,
 /// patcher dims, …). Each field is visited by ``for_each`` via the
 /// X-macro below — pybind11 then exposes every field as a read/write
-/// attribute on the Python ``Qwen3_5VitWeightConfig``.
-struct Qwen3_5VitWeightConfig: ModuleConfig {
-    Qwen3_5VitWeightConfig(): ModuleConfig{"Qwen3_5VitWeight"} {}
+/// attribute on the Python ``Qwen3_5VitConfig``.
+struct Qwen3_5VitConfig: ModuleConfig {
+    Qwen3_5VitConfig(): ModuleConfig{"Qwen3_5VitWeight"} {}
 
     DataType data_type{};
     int      hidden_dim{0};
@@ -24,11 +24,14 @@ struct Qwen3_5VitWeightConfig: ModuleConfig {
     int      head_num{0};
     int      intermediate_size{0};
     int      patch_in_dim{0};
+    int      in_channels{0};
+    int      patch_size{0};
+    int      temporal_patch_size{0};
     int      num_position_embeddings{0};
     int      spatial_merge_size{0};
     float    norm_eps{1e-6f};
 
-#define QWEN3_5VIT_WEIGHT_FIELDS(X)                                                                                    \
+#define QWEN3_5VIT_FIELDS(X)                                                                                           \
     X(DataType, data_type)                                                                                             \
     X(int, hidden_dim)                                                                                                 \
     X(int, out_hidden_dim)                                                                                             \
@@ -36,13 +39,16 @@ struct Qwen3_5VitWeightConfig: ModuleConfig {
     X(int, head_num)                                                                                                   \
     X(int, intermediate_size)                                                                                          \
     X(int, patch_in_dim)                                                                                               \
+    X(int, in_channels)                                                                                                \
+    X(int, patch_size)                                                                                                 \
+    X(int, temporal_patch_size)                                                                                         \
     X(int, num_position_embeddings)                                                                                    \
     X(int, spatial_merge_size)                                                                                         \
     X(float, norm_eps, 1e-6f)
 
-    TM_FOR_EACH(Qwen3_5VitWeightConfig, QWEN3_5VIT_WEIGHT_FIELDS)
+    TM_FOR_EACH(Qwen3_5VitConfig, QWEN3_5VIT_FIELDS)
 
-#undef QWEN3_5VIT_WEIGHT_FIELDS
+#undef QWEN3_5VIT_FIELDS
 };
 
 }  // namespace turbomind::core
@@ -74,7 +80,7 @@ public:
     }
 
     Qwen3_5VitWeight() = default;
-    explicit Qwen3_5VitWeight(const core::Qwen3_5VitWeightConfig& cfg);
+    explicit Qwen3_5VitWeight(const core::Qwen3_5VitConfig& cfg);
 
     void prepare() override;
     bool verify(std::vector<std::string>& missing) override;
@@ -94,19 +100,15 @@ public:
     TM_MODULE_DECLARE(Qwen3_5VitWeight, QWEN3_5VIT_WEIGHT_CHILDREN, QWEN3_5VIT_WEIGHT_PARAMS)
 
     // --- Accessors ---
+    const core::Qwen3_5VitConfig& config() const noexcept
+    {
+        return config_;
+    }
+
     Qwen3_5VitBlockWeight* block(int i) const;
 
-    // --- Config-derived public scalars ---
-    DataType data_type{};
-    int      hidden_dim{};      // visual transformer hidden size
-    int      out_hidden_dim{};  // post-merger hidden size (matches LM hidden)
-    int      depth{};
-    int      head_num{};
-    int      intermediate_size{};
-    int      patch_in_dim{};
-    int      num_position_embeddings{};
-    int      spatial_merge_size{};
-    float    norm_eps{};
+private:
+    core::Qwen3_5VitConfig config_{};
 };
 
 }  // namespace turbomind
