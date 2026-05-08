@@ -15,6 +15,9 @@ add_library(models STATIC
         model_weight.cc
         model_root.cc
         visual_model.cc
+        qwen3_5vit/fast_pos_embed.cu
+        qwen3_5vit/fast_rotary_pos_emb.cu
+        qwen3_5vit/fused_embed_merge.cu
         qwen3_5vit/qwen3_5vit_block_weight.cc
         qwen3_5vit/qwen3_5vit_weight.cc
         qwen3_5vit/qwen3_5vit.cc

@@ -11,17 +11,7 @@
 
 namespace turbomind {
 
-Qwen3_5VitWeight::Qwen3_5VitWeight(const core::Qwen3_5VitWeightConfig& cfg):
-    data_type{cfg.data_type},
-    hidden_dim{cfg.hidden_dim},
-    out_hidden_dim{cfg.out_hidden_dim},
-    depth{cfg.depth},
-    head_num{cfg.head_num},
-    intermediate_size{cfg.intermediate_size},
-    patch_in_dim{cfg.patch_in_dim},
-    num_position_embeddings{cfg.num_position_embeddings},
-    spatial_merge_size{cfg.spatial_merge_size},
-    norm_eps{cfg.norm_eps}
+Qwen3_5VitWeight::Qwen3_5VitWeight(const core::Qwen3_5VitConfig& cfg): config_{cfg}
 {
 }
 
@@ -33,7 +23,7 @@ void Qwen3_5VitWeight::prepare()
     });
 
     if (pos_embed) {
-        EnsureFloatDtype(pos_embed, data_type);
+        EnsureFloatDtype(pos_embed, config_.data_type);
     }
 }
 
@@ -46,9 +36,9 @@ bool Qwen3_5VitWeight::verify(std::vector<std::string>& missing)
     if (!pos_embed) {
         missing.push_back(full_path() + ": missing pos_embed");
     }
-    if (!blocks || blocks->size() != depth) {
+    if (!blocks || blocks->size() != config_.depth) {
         missing.push_back(full_path() + ": blocks count mismatch (expected "
-                          + std::to_string(depth) + ")");
+                          + std::to_string(config_.depth) + ")");
     }
     if (!merger_fc1 || !merger_fc2 || !merger_norm) {
         missing.push_back(full_path() + ": missing merger");
@@ -70,7 +60,7 @@ Qwen3_5VitWeight::make_model(const EngineParam& engine, const Context& ctx, int 
     return std::make_unique<Qwen3_5Vit>(engine, ctx, *this, phases);
 }
 
-TM_MODULE_REGISTER(Qwen3_5VitWeight, core::Qwen3_5VitWeightConfig);
+TM_MODULE_REGISTER(Qwen3_5VitWeight, core::Qwen3_5VitConfig);
 
 TM_MODULE_METHODS(Qwen3_5VitWeight, QWEN3_5VIT_WEIGHT_CHILDREN, QWEN3_5VIT_WEIGHT_PARAMS)
 

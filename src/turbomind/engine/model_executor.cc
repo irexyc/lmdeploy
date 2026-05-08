@@ -62,10 +62,16 @@ struct ModelExecutor::Impl {
         BatchCopy copy;
         TensorMap env{{"batch", d.buf()}, {"copy", copy.buf()}};
 
+        if (visual_model_) {
+            visual_model_->Run(BatchOp::kPrepare, d.phase, env);
+        }
         model_.Run(BatchOp::kPrepare, d.phase, env);
         // dbg(copy);
         copy.Run();
 
+        if (visual_model_) {
+            visual_model_->Run(BatchOp::kForward, d.phase, env);
+        }
         model_.Run(BatchOp::kForward, d.phase, env);
 
         model_.Run(BatchOp::kUnprep, d.phase, env);

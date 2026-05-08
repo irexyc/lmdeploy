@@ -242,13 +242,11 @@ def get_tm_config(model_path,
         disable_vision_encoder=engine_config.disable_vision_encoder)
     model_cls = INPUT_MODELS.get(registered_name)
 
-    cfg = source_model_config(hf_model_cfg)
+    cfg = hf_model_cfg if getattr(model_cls, '_vision', False) else source_model_config(hf_model_cfg)
     if engine_config.hf_overrides:
         logger.warning(f'Overriding HF config with {engine_config.hf_overrides}')
         _apply_hf_overrides(cfg, engine_config.hf_overrides)
 
-    if getattr(model_cls, '_vision', False):
-        cfg = hf_model_cfg
     text_model = model_cls(cfg, resolver=resolver)
 
     return text_model, model_path, _cpp_dtype(dtype)

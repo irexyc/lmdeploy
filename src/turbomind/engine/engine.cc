@@ -93,6 +93,9 @@ struct Engine::Impl {
 
     void Run(BatchOp op, int phase, Ref<TensorMap> env)
     {
+        if (visual_model_) {
+            visual_model_->Run(op, phase, env);
+        }
         model_.Run(op, phase, env);
     }
 

@@ -25,4 +25,10 @@ public:
     virtual void Run(BatchOp op, int phase, TensorMap& env) = 0;
 };
 
+struct MultiModalData {
+    Tensor             data;  // pixel values
+    Interval           interval;
+    std::array<int, 3> grid_thw;  // qwen3
+};
+
 }  // namespace turbomind
