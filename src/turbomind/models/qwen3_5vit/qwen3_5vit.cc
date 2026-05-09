@@ -178,7 +178,9 @@ struct Qwen3_5Vit::Impl {
             for (const auto& item : mm_inputs) {
                 const auto& doc      = item.get<multimodal::Document>();
                 const auto& modality = doc.at("modality").get<std::string>();
-                const int   offset   = doc.at("offset").get<std::int64_t>();
+                const auto& ranges   = doc.at("offset").get<multimodal::Array>();
+                const int   offset   = ranges[0].get<int64_t>();
+                const int   tokens   = ranges[1].get<int64_t>() - offset;
 
                 if (modality != "image" && modality != "video") {
                     return Request::kInvalid;
@@ -190,11 +192,6 @@ struct Qwen3_5Vit::Impl {
                     const auto& ten  = doc.at(key).get<Tensor>();
                     auto        data = ten.data<int64_t>();
                     return std::array<int, 3>{(int)data[0], (int)data[1], (int)data[2]};
-                }();
-
-                int tokens = [&]() {
-                    const auto key = is_image ? "image_tokens" : "video_tokens";
-                    return *doc.at(key).get<Tensor>().data<int64_t>();
                 }();
 
                 auto data = [&]() {
