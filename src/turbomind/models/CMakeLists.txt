@@ -41,6 +41,7 @@ target_link_libraries(models PUBLIC
         core
         gemm2
         rms_norm
+        layer_norm
         CUDA::cublas
         CUDA::cudart
         nvidia::cutlass::cutlass

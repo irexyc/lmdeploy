@@ -4,10 +4,13 @@
 
 #include "src/turbomind/core/logger.h"
 #include "src/turbomind/kernels/gpt_kernels.h"
+#include "src/turbomind/kernels/norm/layer_norm.h"
+#include "src/turbomind/models/layer_norm_weight.h"
 #include "src/turbomind/models/llama/SequenceManager.h"
 #include "src/turbomind/models/qwen3_5vit/fast_pos_embed.h"
 #include "src/turbomind/models/qwen3_5vit/fast_rotary_pos_emb.h"
 #include "src/turbomind/models/qwen3_5vit/fused_embed_merge.h"
+#include "src/turbomind/models/qwen3_5vit/qwen3_5vit_block_weight.h"
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_weight.h"
 #include "src/turbomind/utils/memory_utils.h"
 
@@ -382,13 +385,32 @@ struct Qwen3_5Vit::Impl {
                                  stream);
         sync_check_cuda_error();
 
-        // 3) decoder
-
         // DumpTensorToBin(pos_embeds, "pos_embeds_" + std::to_string(d_comm_->rank(tp_group_)) + ".bin");
         // DumpTensorToBin(pos_embed_weights, "pos_embed_weights_" + std::to_string(d_comm_->rank(tp_group_)) + ".bin");
 
         // DumpTensorToBin(residual, "residual_" + std::to_string(d_comm_->rank(tp_group_)) + ".bin");
         // TM_LOG_ERROR("residual {} {}, dtype {}", residual.shape(0), residual.shape(1), (int)residual.dtype());
+
+        // 3) decoder
+        Tensor hidden_states = [&]() {
+            Buffer symm_buf = args.contains("symm_buf") ? args.at("symm_buf").buffer() : Buffer{};
+            if (symm_buf && d.batch_size * cfg.hidden_dim <= symm_buf.size() / turbomind::byte_size(cfg.data_type)) {
+                return Tensor{symm_buf.view(cfg.data_type), {d.batch_size, cfg.hidden_dim}};
+            }
+            else {
+                return Tensor{{d.batch_size, cfg.hidden_dim}, cfg.data_type, kDEVICE};
+            }
+        }();
+
+        invokeLayerNorm(hidden_states,
+                        residual,
+                        weights_.block(0)->norm1->weight,
+                        weights_.block(0)->norm1->bias,
+                        weights_.block(0)->norm1->norm_eps_,
+                        stream);
+        sync_check_cuda_error();
+
+        // TODO: feed hidden_states into vision attention once Qwen3.5 ViT attention is implemented.
     }
 };
 
