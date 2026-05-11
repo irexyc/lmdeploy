@@ -5,6 +5,7 @@
 #include "src/turbomind/core/logger.h"
 #include "src/turbomind/kernels/gpt_kernels.h"
 #include "src/turbomind/kernels/norm/layer_norm.h"
+#include "src/turbomind/kernels/norm/rms_norm.h"
 #include "src/turbomind/models/layer_norm_weight.h"
 #include "src/turbomind/models/llama/SequenceManager.h"
 #include "src/turbomind/models/qwen3_5vit/bias_gelu.h"
@@ -128,6 +129,15 @@ struct Qwen3_5Vit::Impl {
         grid_thws_buf_    = {engine.max_forward_token_num * 3, kCPUpinned};
         grid_offsets_buf_ = {engine.max_forward_token_num * 2, kCPUpinned};
         mapped_idx_buf_   = {engine.max_forward_token_num, kCPUpinned};
+    }
+
+    void AllReduceSum(Tensor& tensor, cudaStream_t stream) const
+    {
+        if (d_comm_) {
+            d_comm_->AllReduceSum(
+                tensor.raw_data(), tensor.raw_data(), tensor.size(), tensor.dtype(), tp_group_, stream);
+            sync_check_cuda_error();
+        }
     }
 
     void FastPosEmbedInterpolate(Data& d, TensorMap& env)
@@ -451,15 +461,7 @@ struct Qwen3_5Vit::Impl {
             };
             TM_DISPATCH_PRIMARY_DTYPES(hidden_states.dtype(), invoke);
 
-            if (d_comm_) {
-                d_comm_->AllReduceSum(hidden_states.raw_data(),
-                                      hidden_states.raw_data(),
-                                      hidden_states.size(),
-                                      hidden_states.dtype(),
-                                      tp_group_,
-                                      stream);
-                sync_check_cuda_error();
-            }
+            AllReduceSum(hidden_states, stream);
 
             auto* block = weights_.block(layer_id);
             invokeResidualBiasLayerNorm(hidden_states.raw_data(),
@@ -475,18 +477,8 @@ struct Qwen3_5Vit::Impl {
             sync_check_cuda_error();
 
             // mlp
-            // use intermediate data (norm2.bin) to avoid accumulating errors. should be removed in the final version.
-            ReadTensorFromBin(hidden_states, "norm2.bin");
             Mlp(hidden_states, hidden_states, d, layer_id);
-            if (d_comm_) {
-                d_comm_->AllReduceSum(hidden_states.raw_data(),
-                                      hidden_states.raw_data(),
-                                      hidden_states.size(),
-                                      hidden_states.dtype(),
-                                      tp_group_,
-                                      stream);
-                sync_check_cuda_error();
-            }
+            AllReduceSum(hidden_states, stream);
 
             const auto* next_norm =
                 layer_id + 1 < cfg.depth ? weights_.block(layer_id + 1)->norm1.get() : weights_.merger_norm.get();
@@ -506,7 +498,10 @@ struct Qwen3_5Vit::Impl {
             break;  // just test single layer
         }
 
-        DumpTensorToBin(hidden_states, "r4_" + std::to_string(d_comm_ ? d_comm_->rank(tp_group_) : 0) + ".bin");
+        ReadTensorFromBin(hidden_states, "merger_input.bin");
+        Tensor image_embeds = Merger(hidden_states);
+
+        // DumpTensorToBin(image_embeds, "r4_" + std::to_string(d_comm_ ? d_comm_->rank(tp_group_) : 0) + ".bin");
     }
 
     template<typename T>
@@ -533,11 +528,36 @@ struct Qwen3_5Vit::Impl {
         Tensor inter = linear_.Forward(input, *block->mlp_fc1);
         sync_check_cuda_error();
 
-        invokeQwen3_5VitBiasGelu(inter, block->mlp_fc1->bias, stream);
+        invokeQwen3_5VitBiasActivation(inter, block->mlp_fc1->bias, ActivationType::kGeluPytorchTanh, stream);
         sync_check_cuda_error();
 
         output = linear_.Forward(inter, *block->mlp_fc2, output);
         sync_check_cuda_error();
+    }
+
+    Tensor Merger(Tensor& input)
+    {
+        auto& cfg    = config_;
+        auto  stream = core::Context::stream().handle();
+
+        const int merge_area   = cfg.spatial_merge_size * cfg.spatial_merge_size;
+        Tensor    merged_input = input.view({-1, cfg.hidden_dim * merge_area});
+
+        Tensor inter = linear_.Forward(merged_input, *weights_.merger_fc1);
+        sync_check_cuda_error();
+
+        invokeQwen3_5VitBiasActivation(inter, weights_.merger_fc1->bias, ActivationType::kGelu, stream);
+        sync_check_cuda_error();
+
+        Tensor output = linear_.Forward(inter, *weights_.merger_fc2);
+        sync_check_cuda_error();
+
+        AllReduceSum(output, stream);
+
+        ApplyBias(output, weights_.merger_fc2->bias, stream);
+        sync_check_cuda_error();
+
+        return output;
     }
 };
 
