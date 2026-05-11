@@ -7,6 +7,7 @@
 #include "src/turbomind/kernels/norm/layer_norm.h"
 #include "src/turbomind/models/layer_norm_weight.h"
 #include "src/turbomind/models/llama/SequenceManager.h"
+#include "src/turbomind/models/qwen3_5vit/bias_gelu.h"
 #include "src/turbomind/models/qwen3_5vit/fast_pos_embed.h"
 #include "src/turbomind/models/qwen3_5vit/fast_rotary_pos_emb.h"
 #include "src/turbomind/models/qwen3_5vit/fused_embed_merge.h"
@@ -473,9 +474,34 @@ struct Qwen3_5Vit::Impl {
                                         stream);
             sync_check_cuda_error();
 
-            // TODO: mlp
+            // mlp
+            // use intermediate data (norm2.bin) to avoid accumulating errors. should be removed in the final version.
+            ReadTensorFromBin(hidden_states, "norm2.bin");
+            Mlp(hidden_states, hidden_states, d, layer_id);
+            if (d_comm_) {
+                d_comm_->AllReduceSum(hidden_states.raw_data(),
+                                      hidden_states.raw_data(),
+                                      hidden_states.size(),
+                                      hidden_states.dtype(),
+                                      tp_group_,
+                                      stream);
+                sync_check_cuda_error();
+            }
 
-            // TODO: norm
+            const auto* next_norm =
+                layer_id + 1 < cfg.depth ? weights_.block(layer_id + 1)->norm1.get() : weights_.merger_norm.get();
+            TM_CHECK_NOTNULL(next_norm);
+            invokeResidualBiasLayerNorm(hidden_states.raw_data(),
+                                        residual.raw_data(),
+                                        next_norm->weight.raw_data(),
+                                        next_norm->bias.data_or((void*)nullptr),
+                                        block->mlp_fc2->bias.data_or((void*)nullptr),
+                                        hidden_states.dtype(),
+                                        cfg.hidden_dim,
+                                        d.batch_size,
+                                        next_norm->norm_eps_,
+                                        stream);
+            sync_check_cuda_error();
 
             break;  // just test single layer
         }
@@ -495,10 +521,23 @@ struct Qwen3_5Vit::Impl {
         sync_check_cuda_error();
     }
 
-    Tensor Mlp(Tensor& hidden_states, Data& d, int layer_id)
+    void Mlp(Tensor& input, Tensor& output, Data& d, int layer_id)
     {
-        // TODO: implement mlp forward
-        return hidden_states;
+        auto* block  = weights_.block(layer_id);
+        auto  stream = core::Context::stream().handle();
+
+        TM_CHECK(block);
+        TM_CHECK_EQ(input.shape(0), d.batch_size);
+        TM_CHECK_EQ(input.shape(1), config_.hidden_dim);
+
+        Tensor inter = linear_.Forward(input, *block->mlp_fc1);
+        sync_check_cuda_error();
+
+        invokeQwen3_5VitBiasGelu(inter, block->mlp_fc1->bias, stream);
+        sync_check_cuda_error();
+
+        output = linear_.Forward(inter, *block->mlp_fc2, output);
+        sync_check_cuda_error();
     }
 };
 
