@@ -14,4 +14,15 @@ void invokeLayerNorm(Tensor&       out,
                      float         eps,
                      cudaStream_t  stream);
 
+void invokeResidualBiasLayerNorm(void*        hidden_states,
+                                 void*        residual,
+                                 const void*  norm_weight,
+                                 const void*  norm_bias,
+                                 const void*  residual_bias,
+                                 DataType     dtype,
+                                 int          dims,
+                                 int          num,
+                                 float        eps,
+                                 cudaStream_t stream);
+
 }  // namespace turbomind

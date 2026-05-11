@@ -39,6 +39,37 @@ namespace {
     }
 }
 
+[[maybe_unused]] void ReadTensorFromBin(Tensor& tensor, const std::string& input_path)
+{
+    TM_CHECK(tensor) << "Cannot read an empty tensor from " << input_path;
+    TM_CHECK(tensor.is_contiguous()) << "Only contiguous tensors can be read: " << tensor;
+
+    const bool is_host_tensor = tensor.device().type == kCPU || tensor.device().type == kCPUpinned;
+    Tensor     host_tensor    = is_host_tensor ? tensor : Tensor{tensor.layout(), tensor.dtype(), kCPU};
+    const auto expected_bytes = host_tensor.byte_size();
+
+    std::ifstream ifs(input_path, std::ios::binary | std::ios::ate);
+    TM_CHECK(ifs.is_open()) << "Failed to open " << input_path << " for reading";
+
+    const std::streamoff actual_bytes = ifs.tellg();
+    TM_CHECK_GE(actual_bytes, 0) << "Failed to get size of " << input_path;
+    TM_CHECK_EQ(actual_bytes, expected_bytes)
+        << "Unexpected tensor file size for " << input_path << ", tensor " << tensor;
+
+    ifs.seekg(0, std::ios::beg);
+    TM_CHECK(ifs.good()) << "Failed to seek " << input_path;
+
+    if (expected_bytes) {
+        ifs.read(static_cast<char*>(host_tensor.raw_data()), expected_bytes);
+        TM_CHECK(ifs.good()) << "Failed to read tensor from " << input_path;
+    }
+
+    if (!is_host_tensor) {
+        Copy(host_tensor, tensor);
+        core::Context::stream().Sync();
+    }
+}
+
 }  // namespace
 
 struct Qwen3_5Vit::Impl {
@@ -410,7 +441,64 @@ struct Qwen3_5Vit::Impl {
                         stream);
         sync_check_cuda_error();
 
-        // TODO: feed hidden_states into vision attention once Qwen3.5 ViT attention is implemented.
+        for (int layer_id = 0; layer_id < cfg.depth; ++layer_id) {
+
+            // attn
+            auto invoke = [&](auto t) {
+                using T = decltype(t);
+                Attn<T>(hidden_states, hidden_states, d, layer_id);
+            };
+            TM_DISPATCH_PRIMARY_DTYPES(hidden_states.dtype(), invoke);
+
+            if (d_comm_) {
+                d_comm_->AllReduceSum(hidden_states.raw_data(),
+                                      hidden_states.raw_data(),
+                                      hidden_states.size(),
+                                      hidden_states.dtype(),
+                                      tp_group_,
+                                      stream);
+                sync_check_cuda_error();
+            }
+
+            auto* block = weights_.block(layer_id);
+            invokeResidualBiasLayerNorm(hidden_states.raw_data(),
+                                        residual.raw_data(),
+                                        block->norm2->weight.raw_data(),
+                                        block->norm2->bias.data_or((void*)nullptr),
+                                        block->attention->wo->bias.data_or((void*)nullptr),
+                                        hidden_states.dtype(),
+                                        cfg.hidden_dim,
+                                        d.batch_size,
+                                        block->norm2->norm_eps_,
+                                        stream);
+            sync_check_cuda_error();
+
+            // TODO: mlp
+
+            // TODO: norm
+
+            break;  // just test single layer
+        }
+
+        DumpTensorToBin(hidden_states, "r4_" + std::to_string(d_comm_ ? d_comm_->rank(tp_group_) : 0) + ".bin");
+    }
+
+    template<typename T>
+    void Attn(Tensor& input, Tensor& output, Data& d, int layer_id)
+    {
+        (void)input;
+        (void)d;
+        (void)layer_id;
+
+        // TODO: implement attn forward, currently, use pre-computed values
+        ReadTensorFromBin(output, d_comm_ ? "attn_no_bias_tp2.bin" : "attn_no_bias_tp1.bin");
+        sync_check_cuda_error();
+    }
+
+    Tensor Mlp(Tensor& hidden_states, Data& d, int layer_id)
+    {
+        // TODO: implement mlp forward
+        return hidden_states;
     }
 };
 
