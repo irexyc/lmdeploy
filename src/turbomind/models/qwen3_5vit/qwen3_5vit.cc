@@ -501,7 +501,8 @@ struct Qwen3_5Vit::Impl {
         ReadTensorFromBin(hidden_states, "merger_input.bin");
         Tensor image_embeds = Merger(hidden_states);
 
-        // DumpTensorToBin(image_embeds, "r4_" + std::to_string(d_comm_ ? d_comm_->rank(tp_group_) : 0) + ".bin");
+        args.produce("multimodal",
+                     MultiModalEmbeddingData{image_embeds, d.image_embeds_coords, d.input_embeds_coords}.buf());
     }
 
     template<typename T>
