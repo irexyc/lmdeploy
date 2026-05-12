@@ -167,6 +167,7 @@ class Qwen3_5Model(_Qwen3_5Model):
         cfg.head_num = self._vis_heads
         cfg.kv_head_num = self._vis_heads
         cfg.window_size = 0
+        cfg.causal = False
         cfg.softmax_scale = 0.0
         return cfg
 

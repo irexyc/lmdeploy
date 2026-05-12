@@ -21,6 +21,7 @@ AttentionWeight::AttentionWeight(const core::AttentionConfig& cfg):
     tp_rank(cfg.tp_rank),
     data_type(cfg.data_type),
     window_size(cfg.window_size),
+    causal(cfg.causal),
     output_gate(cfg.output_gate),
     softmax_scale(cfg.softmax_scale),
     use_logn_attn(cfg.use_logn_attn),
