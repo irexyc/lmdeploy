@@ -18,16 +18,33 @@
 #include "src/turbomind/utils/memory_utils.h"
 
 #include <cmath>
+#include <cstddef>
 #include <fstream>
+#include <string>
 
 namespace turbomind {
 
 namespace {
 
+std::string TensorShapeString(const Tensor& tensor)
+{
+    std::string str   = "[";
+    const auto& shape = tensor.shape();
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i) {
+            str += ", ";
+        }
+        str += std::to_string(shape[i]);
+    }
+    str += "]";
+    return str;
+}
+
 [[maybe_unused]] void DumpTensorToBin(const Tensor& tensor, const std::string& output_path)
 {
     TM_CHECK(tensor) << "Cannot dump an empty tensor to " << output_path;
     TM_CHECK(tensor.is_contiguous()) << "Only contiguous tensors can be dumped: " << tensor;
+    TM_LOG_ERROR("DumpTensorToBin: file={}, shape={}", output_path, TensorShapeString(tensor));
 
     Tensor host_tensor{tensor.layout(), tensor.dtype(), kCPU};
     Copy(tensor, host_tensor);
@@ -46,6 +63,7 @@ namespace {
 {
     TM_CHECK(tensor) << "Cannot read an empty tensor from " << input_path;
     TM_CHECK(tensor.is_contiguous()) << "Only contiguous tensors can be read: " << tensor;
+    TM_LOG_ERROR("ReadTensorFromBin: file={}, shape={}", input_path, TensorShapeString(tensor));
 
     const bool is_host_tensor = tensor.device().type == kCPU || tensor.device().type == kCPUpinned;
     Tensor     host_tensor    = is_host_tensor ? tensor : Tensor{tensor.layout(), tensor.dtype(), kCPU};
