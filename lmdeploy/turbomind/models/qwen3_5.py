@@ -29,6 +29,7 @@ from ..linear import Linear, transform_output_dim
 from ..weight_format import TrivialFormat
 from .base import INPUT_MODELS
 from ._qwen3_5 import _Qwen3_5Model
+from .utils import reorder_rotary_emb
 
 
 @transform_output_dim
@@ -175,8 +176,14 @@ class Qwen3_5Model(_Qwen3_5Model):
         cfg = self._make_visual_attn_cfg()
         q, k, v = _split_packed_visual_qkv(self._linear(pfx + 'qkv'))
 
-        # Qwen3.5 ViT applies RoPE before invoking the attention kernel, so
-        # Q/K must keep HF order here rather than using text rotary reorder.
+        # Qwen3.5 ViT applies RoPE before invoking the attention kernel.
+        # Reorder Q/K once at export time so the runtime can use the same
+        # adjacent-pair RoPE layout as TurboMind's attention kernels.
+        q = reorder_rotary_emb(q, cfg.head_dim, cfg.head_dim,
+                               resolver=self._resolver)
+        k = reorder_rotary_emb(k, cfg.head_dim, cfg.head_dim,
+                               resolver=self._resolver)
+
         m = AttentionBuilder(cfg, self._ctx, tp=self._model_tp)
         m.add_qkv_proj(q, k, v)
         m.add_o_proj(self._linear(pfx + 'proj'))

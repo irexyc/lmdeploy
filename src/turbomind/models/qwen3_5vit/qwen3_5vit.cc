@@ -12,6 +12,7 @@
 #include "src/turbomind/models/qwen3_5vit/fast_pos_embed.h"
 #include "src/turbomind/models/qwen3_5vit/fast_rotary_pos_emb.h"
 #include "src/turbomind/models/qwen3_5vit/fused_embed_merge.h"
+#include "src/turbomind/models/qwen3_5vit/qkv_preprocess.h"
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_block_weight.h"
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_weight.h"
 #include "src/turbomind/utils/memory_utils.h"
@@ -177,8 +178,8 @@ struct Qwen3_5Vit::Impl {
 
         const int head_dim = cfg.hidden_dim / cfg.head_num;
         // produce rotary_pos_emb: [total_hw, head_dim] with interleaved (c,s,c,s,...) pairs,
-        // keyed by the same natural flat index that `mapped_idx` already carries. Turbomind's
-        // q/k are pre-permuted into pair-interleaved layout (via `permute_v2` at export time).
+        // keyed by the same natural flat index that `mapped_idx` already carries. Visual q/k
+        // are reordered into this adjacent-pair layout at export time.
         Tensor rotary_pos_emb = {{d.total_hw, head_dim}, cfg.data_type, kDEVICE};
         invokeQwen3VitRotaryPosEmb(rotary_pos_emb.raw_data(),
                                    cfg.data_type,
@@ -457,7 +458,7 @@ struct Qwen3_5Vit::Impl {
             // attn
             auto invoke = [&](auto t) {
                 using T = decltype(t);
-                Attn<T>(hidden_states, hidden_states, d, layer_id);
+                Attn<T>(hidden_states, hidden_states, d, layer_id, rotary_pos_emb);
             };
             TM_DISPATCH_PRIMARY_DTYPES(hidden_states.dtype(), invoke);
 
@@ -506,8 +507,31 @@ struct Qwen3_5Vit::Impl {
     }
 
     template<typename T>
-    void Attn(Tensor& input, Tensor& output, Data& d, int layer_id)
+    void Attn(Tensor& input, Tensor& output, Data& d, int layer_id, const Tensor& rotary_pos_emb)
     {
+        auto*  block = weights_.block(layer_id);
+        auto*  attn  = block->attention.get();
+        Tensor qkv   = linear_.Forward(input, *attn->w_qkv);
+        sync_check_cuda_error();
+
+        const int local_head_num = attn->head_num / attn->tp_size;
+        const int head_dim       = attn->head_dim;
+        Tensor    kv{{local_head_num, 2, d.batch_size, head_dim}, qkv.dtype(), qkv.device()};
+
+        invokeQwen3_5VitPrepareQKV(qkv.raw_data(),
+                                   kv.raw_data(),
+                                   attn->w_qkv->bias.raw_data(),
+                                   rotary_pos_emb.raw_data(),
+                                   d.mapped_idx.data(),
+                                   qkv.dtype(),
+                                   d.batch_size,
+                                   local_head_num,
+                                   head_dim,
+                                   core::Context::stream().handle());
+        sync_check_cuda_error();
+
+        DumpTensorToBin(kv, "kv_" + std::to_string(d_comm_ ? d_comm_->rank(tp_group_) : 0) + ".bin");
+
         (void)input;
         (void)d;
         (void)layer_id;
