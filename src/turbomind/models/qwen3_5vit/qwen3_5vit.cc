@@ -3,6 +3,7 @@
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit.h"
 
 #include "src/turbomind/core/logger.h"
+#include "src/turbomind/kernels/attention/attention.h"
 #include "src/turbomind/kernels/gpt_kernels.h"
 #include "src/turbomind/kernels/norm/layer_norm.h"
 #include "src/turbomind/kernels/norm/rms_norm.h"
@@ -17,9 +18,12 @@
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_weight.h"
 #include "src/turbomind/utils/memory_utils.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <functional>
+#include <numeric>
 #include <string>
 
 namespace turbomind {
@@ -104,6 +108,7 @@ struct Qwen3_5Vit::Impl {
     Buffer_<int> grid_thws_buf_;     // (t, h, w)
     Buffer_<int> grid_offsets_buf_;  // (t*h*w, h*w)
     Buffer_<int> mapped_idx_buf_;    // [batch]
+    Buffer_<int> attn_cu_seqlens_buf_;
 
     struct Data {
         Tensor_<float>                   batch_input;
@@ -118,10 +123,18 @@ struct Qwen3_5Vit::Impl {
         Tensor_<int> mapped_idx;
         int          total_hw;
 
+        // for full attention, one sequence per temporal frame
+        Tensor_<int>  attn_cu_seqlens;
+        Tensor_<bool> attn_finished;
+        int           attn_batch_size;
+        int           max_attn_len;
+
         void Clear()
         {
-            batch_size = 0;
-            total_hw   = 0;
+            batch_size      = 0;
+            total_hw        = 0;
+            attn_batch_size = 0;
+            max_attn_len    = 0;
             grid_thws_host.clear();
             image_embeds_coords.clear();
             input_embeds_coords.clear();
@@ -145,9 +158,10 @@ struct Qwen3_5Vit::Impl {
         }
 
         // should be large enough to hold all patches
-        grid_thws_buf_    = {engine.max_forward_token_num * 3, kCPUpinned};
-        grid_offsets_buf_ = {engine.max_forward_token_num * 2, kCPUpinned};
-        mapped_idx_buf_   = {engine.max_forward_token_num, kCPUpinned};
+        grid_thws_buf_       = {engine.max_forward_token_num * 3, kCPUpinned};
+        grid_offsets_buf_    = {engine.max_forward_token_num * 2, kCPUpinned};
+        mapped_idx_buf_      = {engine.max_forward_token_num, kCPUpinned};
+        attn_cu_seqlens_buf_ = {engine.max_forward_token_num + 1, kCPUpinned};
     }
 
     void AllReduceSum(Tensor& tensor, cudaStream_t stream) const
@@ -342,6 +356,10 @@ struct Qwen3_5Vit::Impl {
 
         // setup fast_pos_embed
         if (const int num_grids = (int)d.grid_thws_host.size(); num_grids > 0) {
+            for (const auto& [t, h, w] : d.grid_thws_host) {
+                d.attn_batch_size += t;
+                d.max_attn_len = std::max(d.max_attn_len, h * w);
+            }
             if (grid_thws_buf_.size() < (ssize_t)num_grids * 3) {
                 core::ContextGuard ctx{Allocator{kCPUpinned}};
                 grid_thws_buf_    = Buffer_<int>{num_grids * 3, kCPUpinned};
@@ -351,15 +369,30 @@ struct Qwen3_5Vit::Impl {
                 core::ContextGuard ctx{Allocator{kCPUpinned}};
                 mapped_idx_buf_ = Buffer_<int>{d.batch_size, kCPUpinned};
             }
-            d.grid_thws    = {{num_grids, 3}, kDEVICE};
-            d.grid_offsets = {{num_grids, 2}, kDEVICE};
-            d.mapped_idx   = {{d.batch_size}, kDEVICE};
+            if (attn_cu_seqlens_buf_.size() < (ssize_t)d.attn_batch_size + 1) {
+                core::ContextGuard ctx{Allocator{kCPUpinned}};
+                attn_cu_seqlens_buf_ = Buffer_<int>{d.attn_batch_size + 1, kCPUpinned};
+            }
+            d.grid_thws       = {{num_grids, 3}, kDEVICE};
+            d.grid_offsets    = {{num_grids, 2}, kDEVICE};
+            d.mapped_idx      = {{d.batch_size}, kDEVICE};
+            d.attn_cu_seqlens = {{d.attn_batch_size + 1}, kDEVICE};
+            d.attn_finished   = {{d.attn_batch_size}, kDEVICE};
 
             std::pair<int, int> offset{};
+            int                 attn_seq_idx            = 0;
+            int                 attn_offset             = 0;
+            attn_cu_seqlens_buf_.data()[attn_seq_idx++] = 0;
             for (int i = 0; i < num_grids; ++i) {
                 const auto& [t, h, w] = d.grid_thws_host[i];
                 TM_CHECK(h % cfg.spatial_merge_size == 0);
                 TM_CHECK(w % cfg.spatial_merge_size == 0);
+                const int hw = h * w;
+                for (int tt = 0; tt < t; ++tt) {
+                    attn_offset += hw;
+                    attn_cu_seqlens_buf_.data()[attn_seq_idx++] = attn_offset;
+                }
+
                 grid_thws_buf_.data()[i * 3]        = t;
                 grid_thws_buf_.data()[i * 3 + 1]    = h;
                 grid_thws_buf_.data()[i * 3 + 2]    = w;
@@ -382,7 +415,6 @@ struct Qwen3_5Vit::Impl {
                         }
                     }
                 }
-                const int hw = h * w;
                 for (int tt = 1; tt < t; ++tt) {
                     std::memcpy(buf + offset.first + tt * hw, buf + offset.first, hw * sizeof(int));
                 }
@@ -392,13 +424,15 @@ struct Qwen3_5Vit::Impl {
                 offset.second += h * w;
             }
             TM_CHECK_EQ(offset.first, d.batch_size);
+            TM_CHECK_EQ(attn_offset, d.batch_size);
+            TM_CHECK_EQ(attn_seq_idx, d.attn_batch_size + 1);
             d.total_hw = offset.second;
             copy(grid_thws_buf_.data(), num_grids * 3, d.grid_thws.data());
             copy(grid_offsets_buf_.data(), num_grids * 2, d.grid_offsets.data());
             copy(mapped_idx_buf_.data(), d.batch_size, d.mapped_idx.data());
+            copy(attn_cu_seqlens_buf_.data(), d.attn_batch_size + 1, d.attn_cu_seqlens.data());
+            Clear(d.attn_finished);
         }
-
-        // prepare attn params
 
         // prepare mrope params for LLM
     }
@@ -513,11 +547,9 @@ struct Qwen3_5Vit::Impl {
                                         next_norm->norm_eps_,
                                         stream);
             sync_check_cuda_error();
-
-            break;  // just test single layer
         }
 
-        ReadTensorFromBin(hidden_states, "merger_input.bin");
+        // ReadTensorFromBin(hidden_states, "merger_input.bin");
         Tensor image_embeds = Merger(hidden_states);
 
         args.produce("multimodal",
@@ -525,37 +557,89 @@ struct Qwen3_5Vit::Impl {
     }
 
     template<typename T>
+    AttentionParams<T> CreateVitAttentionParams(
+        Tensor& attn_context, Tensor& qkv, Tensor& kv, Data& d, const AttentionWeight& attn, int layer_id)
+    {
+        const int local_head_num = attn.head_num / attn.tp_size;
+        const int head_dim       = attn.head_dim;
+        const int token_num      = d.batch_size;
+
+        AttentionParams<T> params{};
+        params.out = (T*)attn_context.raw_data();
+        params.q   = (T*)qkv.raw_data();
+
+        params.stride = (int64_t)local_head_num * 3 * head_dim;
+
+        params.cu_q_len = d.attn_cu_seqlens.data();
+        params.cu_k_len = d.attn_cu_seqlens.data();
+        params.finished = d.attn_finished.data();
+
+        params.linear_iter_params = LinearIteratorParams{
+            kv.raw_data(),
+            2 * token_num * head_dim,
+            token_num * head_dim,
+        };
+
+        params.token_num  = token_num;
+        params.batch_size = d.attn_batch_size;
+        params.max_q_len  = d.max_attn_len;
+        params.max_k_len  = d.max_attn_len;
+
+        params.num_heads     = local_head_num;
+        params.num_kv_heads  = local_head_num;
+        params.size_per_head = head_dim;
+        params.causal        = false;
+        params.layer_id      = layer_id;
+
+        double scaling = 1.;
+        if (attn.softmax_scale) {
+            scaling *= attn.softmax_scale;
+        }
+        else {
+            scaling /= std::sqrt((float)head_dim);
+        }
+        params.inv_sqrt_dh = scaling * std::log2(std::exp(1.));
+
+        params.window_size     = 0;
+        params.rope_param.type = RopeType::kNull;
+        params.max_split_k     = 1;
+        params.cp_size         = 1;
+        params.stream          = core::Context::stream().handle();
+
+        return params;
+    }
+
+    template<typename T>
     void Attn(Tensor& input, Tensor& output, Data& d, int layer_id, const Tensor& rotary_pos_emb)
     {
-        auto*  block = weights_.block(layer_id);
-        auto*  attn  = block->attention.get();
-        Tensor qkv   = linear_.Forward(input, *attn->w_qkv);
+        auto* attn = weights_.block(layer_id)->attention.get();
+
+        Tensor qkv = linear_.Forward(input, *attn->w_qkv);
         sync_check_cuda_error();
 
         const int local_head_num = attn->head_num / attn->tp_size;
         const int head_dim       = attn->head_dim;
-        Tensor    kv{{local_head_num, 2, d.batch_size, head_dim}, qkv.dtype(), qkv.device()};
+        const int token_num      = d.batch_size;
 
+        Tensor tmp_kv{{local_head_num, 2, d.batch_size, head_dim}, qkv.dtype(), qkv.device()};
         invokeQwen3_5VitPrepareQKV(qkv.raw_data(),
-                                   kv.raw_data(),
+                                   tmp_kv.raw_data(),
                                    attn->w_qkv->bias.raw_data(),
                                    rotary_pos_emb.raw_data(),
                                    d.mapped_idx.data(),
                                    qkv.dtype(),
-                                   d.batch_size,
+                                   token_num,
                                    local_head_num,
                                    head_dim,
                                    core::Context::stream().handle());
         sync_check_cuda_error();
 
-        DumpTensorToBin(kv, "kv_" + std::to_string(d_comm_ ? d_comm_->rank(tp_group_) : 0) + ".bin");
+        Tensor attn_output{{token_num, local_head_num * head_dim}, qkv.dtype(), qkv.device()};
+        auto   params = CreateVitAttentionParams<T>(attn_output, qkv, tmp_kv, d, *attn, layer_id);
+        dispatchAttention<T>(params);
+        sync_check_cuda_error();
 
-        (void)input;
-        (void)d;
-        (void)layer_id;
-
-        // TODO: implement attn forward, currently, use pre-computed values
-        ReadTensorFromBin(output, d_comm_ ? "attn_no_bias_tp2.bin" : "attn_no_bias_tp1.bin");
+        (void)linear_.Forward(attn_output, *attn->wo, output);
         sync_check_cuda_error();
     }
 
