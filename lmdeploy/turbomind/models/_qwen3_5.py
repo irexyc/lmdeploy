@@ -56,6 +56,7 @@ class _Qwen3_5Model(TextModel):
 
         self._attn_cfg = make_attention_config(cfg)
         self._attn_cfg.output_gate = True
+        self._attn_cfg.rope.mrope_interleaved = True
 
         self._n_experts = getattr(cfg, 'num_experts', 0)
 

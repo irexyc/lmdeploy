@@ -25,7 +25,8 @@ struct RopeConfig {
     X(float, llama3_low_freq_factor, 1.f)                                                                              \
     X(float, llama3_high_freq_factor, 4.f)                                                                             \
     X(int, llama3_original_max_position_embeddings, 0)                                                                 \
-    X(MropeSection, mrope_section, {})
+    X(MropeSection, mrope_section, {})                                                                                 \
+    X(bool, mrope_interleaved, false)
 
     ROPE_FIELDS(TM_MEMBER)
     TM_FOR_EACH(RopeConfig, ROPE_FIELDS)

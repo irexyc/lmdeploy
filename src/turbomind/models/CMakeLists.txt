@@ -19,6 +19,7 @@ add_library(models STATIC
         qwen3_5vit/fast_rotary_pos_emb.cu
         qwen3_5vit/fused_embed_merge.cu
         qwen3_5vit/qkv_preprocess.cu
+        qwen3_5vit/mrope_position_ids.cu
         qwen3_5vit/bias_gelu.cu
         qwen3_5vit/qwen3_5vit_block_weight.cc
         qwen3_5vit/qwen3_5vit_weight.cc
@@ -70,5 +71,16 @@ if(BUILD_TEST)
             llama/bench_conv1d_silu.cc)
     target_link_libraries(bench_conv1d_silu PRIVATE
             models
+            CUDA::cudart)
+
+    add_executable(test_mrope_position_ids
+            qwen3_5vit/test_mrope_position_ids.cu)
+    set_property(TARGET test_mrope_position_ids PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+    target_link_libraries(test_mrope_position_ids PRIVATE
+            models
+            attention
+            core
+            cuda_utils
+            fmt::fmt
             CUDA::cudart)
 endif()

@@ -13,6 +13,7 @@
 #include "src/turbomind/models/qwen3_5vit/fast_pos_embed.h"
 #include "src/turbomind/models/qwen3_5vit/fast_rotary_pos_emb.h"
 #include "src/turbomind/models/qwen3_5vit/fused_embed_merge.h"
+#include "src/turbomind/models/qwen3_5vit/mrope_position_ids.h"
 #include "src/turbomind/models/qwen3_5vit/qkv_preprocess.h"
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_block_weight.h"
 #include "src/turbomind/models/qwen3_5vit/qwen3_5vit_weight.h"
@@ -21,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <numeric>
@@ -129,6 +131,17 @@ struct Qwen3_5Vit::Impl {
         int           attn_batch_size;
         int           max_attn_len;
 
+        // mrope position-id scratch (per-phase pinned host buffers for fast H2D)
+        Buffer_<int> mrope_segs_host;  // reinterpreted as MropeSegment[], 7 ints per segment
+        Buffer_<int> mrope_length_host;
+        Buffer_<int> mrope_delta_host;
+
+        // mrope outputs — owned here so UnifiedAttentionLayer can safely borrow() across env clears.
+        Buffer_<int> mrope_segs_dev;        // device-side segment scratch, grown alongside host
+        Tensor_<int> mrope_position_ids;    // (bsz, max_active_end, 3), empty when no slot needs table
+        Tensor_<int> mrope_length;          // (bsz,)
+        Tensor_<int> mrope_position_delta;  // (bsz,)
+
         void Clear()
         {
             batch_size      = 0;
@@ -140,6 +153,9 @@ struct Qwen3_5Vit::Impl {
             input_embeds_coords.clear();
         }
     };
+
+    static constexpr int kMropeSegInts = sizeof(MropeSegment) / sizeof(int);
+    static_assert(sizeof(MropeSegment) % sizeof(int) == 0);
 
     std::vector<Data> data_;
 
@@ -153,8 +169,19 @@ struct Qwen3_5Vit::Impl {
     {
         auto& cfg = weights.config();
         for (int i = 0; i < phases; ++i) {
-            auto& d       = data_.emplace_back();
-            d.batch_input = {{engine.max_forward_token_num, cfg.patch_in_dim}, kCPUpinned};
+            auto& d             = data_.emplace_back();
+            d.batch_input       = {{engine.max_forward_token_num, cfg.patch_in_dim}, kCPUpinned};
+            d.mrope_length_host = {engine.max_batch_size, kCPUpinned};
+            d.mrope_delta_host  = {engine.max_batch_size, kCPUpinned};
+            // Generous initial capacity: typical batches emit << bsz * 8 segments. Lazily grown below.
+            d.mrope_segs_host = {engine.max_batch_size * 8 * (ssize_t)kMropeSegInts, kCPUpinned};
+
+            // mrope outputs at worst-case shape so Setup() never reallocates them. Rows beyond
+            // the current bsz (and rows whose length[i] == 0) are stale but unreachable from
+            // FastRoPE — it only reads position_ids[3 * timestep] when `timestep < length[i]`.
+            d.mrope_length         = Tensor_<int>{{engine.max_batch_size}, kDEVICE};
+            d.mrope_position_delta = Tensor_<int>{{engine.max_batch_size}, kDEVICE};
+            d.mrope_position_ids   = Tensor_<int>{{engine.max_batch_size, engine.session_len, 3}, kDEVICE};
         }
 
         // should be large enough to hold all patches
@@ -299,6 +326,130 @@ struct Qwen3_5Vit::Impl {
         }
     }
 
+    // Build the mrope tensors consumed by `UnifiedAttentionLayer` and publish them to env.
+    //
+    // Per-request layout: one row in `(max_batch_size, session_len, 3)` for each slot. Prefill
+    // slots with multimodal_inputs get their active range written by `invokeMropePositionIds`
+    // from a clipped list of MropeSegment descriptors (one per text/image run). All other slots
+    // (decode + text-only prefill) get `length[i] = 0` so FastRoPE falls through to the closed-
+    // form `timestep + delta` path and never reads the stale row.
+    //
+    // The three output tensors live on `Data` (allocated worst-case in the ctor). env shares
+    // ownership via shared_ptr; UAL borrows safely across env clears.
+    void SetupMrope(int phase, TensorMap& env)
+    {
+        auto& d  = data_.at(phase);
+        auto& b  = *env.at("batch").data<BatchData*>()[0];
+        auto& rc = b.rc;
+
+        const int bsz = (int)rc.size();
+        if (bsz <= 0) {
+            return;
+        }
+
+        const int S = weights_.config().spatial_merge_size;
+
+        // 1) One pass to upper-bound segment count, then size host + device scratch in one shot.
+        //    Worst case per prefill slot with mrope: 2*num_images + 1 segments.
+        int upper_segs = 0;
+        for (int i = 0; i < bsz; ++i) {
+            const auto& c = *rc[i];
+            if (!c.autoregres && !c.seq->multimodal_inputs.empty()) {
+                upper_segs += 2 * (int)c.seq->multimodal_inputs.size() + 1;
+            }
+        }
+        const ssize_t upper_ints = (ssize_t)upper_segs * kMropeSegInts;
+        if (upper_ints > d.mrope_segs_host.size()) {
+            core::ContextGuard ctx{Allocator{kCPUpinned}};
+            d.mrope_segs_host = Buffer_<int>{upper_ints, kCPUpinned};
+        }
+        if (upper_ints > d.mrope_segs_dev.size()) {
+            d.mrope_segs_dev = Buffer_<int>{upper_ints, kDEVICE};
+        }
+
+        // 2) Unified per-request walk — always advance mm_off; emit segments only for needs_table.
+        auto* segs        = reinterpret_cast<MropeSegment*>(d.mrope_segs_host.data());
+        int   n_segs      = 0;
+        int   max_seg_len = 0;
+
+        for (int i = 0; i < bsz; ++i) {
+            const auto& c            = *rc[i];
+            const auto& s            = *c.seq;
+            const int   seq_len      = (int)c.req->inputs.at("input_ids").shape(0);
+            const bool  needs_table  = !c.autoregres && !s.multimodal_inputs.empty();
+            const int   active_start = c.history_len + c.alpha;
+            const int   active_end   = active_start + c.input_len;
+
+            auto emit = [&](int run_start, int run_n, int run_base, int h2, int w2) {
+                const int a = std::max(run_start, active_start);
+                const int b = std::min(run_start + run_n, active_end);
+                if (a >= b) {
+                    return;
+                }
+                const int local_off = a - run_start;
+                segs[n_segs++]      = MropeSegment{
+                    i,
+                    a,
+                    b - a,
+                    /*base_pos=*/(h2 == 0) ? run_base + local_off : run_base,
+                    h2,
+                    w2,
+                    /*k_offset=*/(h2 == 0) ? 0 : local_off,
+                };
+                max_seg_len = std::max(max_seg_len, b - a);
+            };
+
+            int row = 0, pos = 0, mm_off = 0;
+            for (const auto& mm : s.multimodal_inputs) {
+                const auto& [t, h, w] = mm->grid_thw;
+                const int h2 = h / S, w2 = w / S, n_tok = t * h2 * w2;
+                TM_CHECK_EQ(n_tok, (int)mm->interval.size()) << "image token count mismatches grid_thw";
+                const int img_start = mm->interval.begin();
+                const int img_base  = img_start + mm_off;
+                if (needs_table) {
+                    if (img_start > row) {
+                        emit(row, img_start - row, pos, /*h2=*/0, /*w2=*/0);
+                    }
+                    emit(img_start, n_tok, img_base, h2, w2);
+                }
+                row               = img_start + n_tok;
+                const int new_pos = std::max({t, h2, w2});
+                pos               = img_base + new_pos;
+                mm_off += new_pos - n_tok;
+            }
+            if (needs_table && row < seq_len) {
+                emit(row, seq_len - row, pos, /*h2=*/0, /*w2=*/0);
+            }
+
+            d.mrope_length_host.data()[i] = needs_table ? seq_len : 0;
+            d.mrope_delta_host.data()[i]  = mm_off;
+        }
+
+        // 3) Copy the bsz prefix of length / delta into the pre-allocated device tensors.
+        //    Rows beyond bsz are untouched (UAL never reads them).
+        Copy(d.mrope_length_host.slice(0, bsz), d.mrope_length.buffer().slice(0, bsz));
+        Copy(d.mrope_delta_host.slice(0, bsz), d.mrope_position_delta.buffer().slice(0, bsz));
+
+        // 4) Populate position_ids only when a slot actually needs the table. Rows for slots
+        //    with length[i] == 0 are unreachable from FastRoPE, so leaving them stale is safe.
+        if (n_segs > 0) {
+            const ssize_t segs_ints = (ssize_t)n_segs * kMropeSegInts;
+            Copy(d.mrope_segs_host.slice(0, segs_ints), d.mrope_segs_dev.slice(0, segs_ints));
+            invokeMropePositionIds(d.mrope_position_ids.data(),
+                                   (int)d.mrope_position_ids.stride(0),
+                                   reinterpret_cast<const MropeSegment*>(d.mrope_segs_dev.data()),
+                                   n_segs,
+                                   max_seg_len,
+                                   core::Context::stream().handle());
+            sync_check_cuda_error();
+        }
+
+        // 5) Publish all three — the consumer relies on this contract unconditionally.
+        env.produce("mrope_length", d.mrope_length);
+        env.produce("mrope_position_delta", d.mrope_position_delta);
+        env.produce("mrope_position_ids", d.mrope_position_ids);
+    }
+
     void Setup(int phase, TensorMap& env)
     {
         // create batch data according to scheduled sequences
@@ -434,7 +585,7 @@ struct Qwen3_5Vit::Impl {
             Clear(d.attn_finished);
         }
 
-        // prepare mrope params for LLM
+        SetupMrope(phase, env);
     }
 
     void Prepare(int phase, TensorMap& env)

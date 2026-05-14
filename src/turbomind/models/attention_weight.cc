@@ -80,11 +80,15 @@ void init_rope_kernel_param(const core::RopeConfig& rope, RopeKernelParam& rope_
         dst.alpha = rope.llama3_original_max_position_embeddings / (2 * 3.14159265358979323846) * inv_diff_freq_factor;
         dst.beta  = rope.llama3_low_freq_factor * inv_diff_freq_factor;
     }
-    else if (rope_type == RopeType::kMrope) {
-        auto& dst     = rope_kernel.mrope;
-        dst.section.x = rope.mrope_section[0] * 2;
-        dst.section.y = rope.mrope_section[1] * 2 + dst.section.x;
-        dst.section.z = rope.mrope_section[2] * 2 + dst.section.y;
+
+    // mrope is layered on top of the base rope: orthogonal to rope_type.
+    rope_kernel.mrope_mode = MropeMode::kNone;
+    const auto& ms         = rope.mrope_section;
+    const bool  has_mrope  = ms[0] > 0 || ms[1] > 0 || ms[2] > 0;
+    if (has_mrope) {
+        rope_kernel.mrope_mode = rope.mrope_interleaved ? MropeMode::kInterleaved : MropeMode::kChunked;
+        auto& dst              = rope_kernel.mrope;
+        dst.section            = {ms[0], ms[1], ms[2]};
     }
 }
 
