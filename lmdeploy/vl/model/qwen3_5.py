@@ -21,6 +21,7 @@ class Qwen3_5Model(Qwen3VLModel):
     """Qwen3_5 model."""
 
     _arch = ['Qwen3_5ForConditionalGeneration', 'Qwen3_5MoeForConditionalGeneration']
+    _turbomind_native_vision = True
 
     def build_preprocessor(self, trust_remote_code: bool = False):
         check_transformers()
