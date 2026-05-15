@@ -29,6 +29,12 @@ struct HeadConfig<72> {
     static constexpr int kHeadsPerWarp = 3;
 };
 
+template<>
+struct HeadConfig<128> {
+    static constexpr int kVecSize      = 8;  // 128 / 8 = 16 vec/head
+    static constexpr int kHeadsPerWarp = 2;  // 16 * 2 = 32 == WARP_SIZE
+};
+
 template<int VecSize, typename T>
 __device__ __forceinline__ void add_bias(Array<float, VecSize>& x, const T* bias)
 {
@@ -86,7 +92,8 @@ __global__ __launch_bounds__(kWarpsPerBlock* WARP_SIZE) void prepareQKVKernel(T*
                                                                               const int* __restrict__ mapped_idx,
                                                                               int token_num,
                                                                               int local_head_num,
-                                                                              int head_group_num)
+                                                                              int head_group_num,
+                                                                              int rope_head_dim)
 {
     using Cfg                   = HeadConfig<HD>;
     constexpr int kVecSize      = Cfg::kVecSize;
@@ -133,8 +140,14 @@ __global__ __launch_bounds__(kWarpsPerBlock* WARP_SIZE) void prepareQKVKernel(T*
     T* const v_dst = k_dst + (int64_t)token_num * HD;
 
     // rope[token, di] is shared between Q and K — load once, reuse twice.
-    Array<T, kVecSize> rope_vec;
-    Ldg(rope_vec, rotary_pos_emb + (int64_t)mapped_idx[token_idx] * HD + di);
+    // When HD > rope_head_dim, padded di-slices have zero Q/K, so loading a
+    // zero rope_vec there is correct (and avoids OOB on the [N, rope_head_dim]
+    // buffer). kVecSize is aligned to rope_head_dim so each vec is fully in or
+    // fully out of the rope range.
+    Array<T, kVecSize> rope_vec{};
+    if (di < rope_head_dim) {
+        Ldg(rope_vec, rotary_pos_emb + (int64_t)mapped_idx[token_idx] * rope_head_dim + di);
+    }
 
     fuse_bias_rope_store<kVecSize>(q_ptr, q_ptr, q_bias, rope_vec);  // Q: in-place
     fuse_bias_rope_store<kVecSize>(k_dst, k_ptr, k_bias, rope_vec);  // K: transposed
@@ -150,17 +163,24 @@ void dispatchPrepareQKV(T*           qkv,
                         int          token_num,
                         int          local_head_num,
                         int          head_dim,
+                        int          rope_head_dim,
                         cudaStream_t stream)
 {
     auto invoke = [&](auto hd_c) {
         constexpr int HD = decltype(hd_c)::value;
         using Cfg        = HeadConfig<HD>;
 
+        // Each vec_size-wide load must lie entirely in or out of the rope range.
+        TM_CHECK(rope_head_dim % Cfg::kVecSize == 0)
+            << "rope_head_dim (" << rope_head_dim << ") must be a multiple of kVecSize (" << Cfg::kVecSize << ")";
+        TM_CHECK(rope_head_dim <= HD) << "rope_head_dim (" << rope_head_dim << ") cannot exceed head_dim (" << HD
+                                      << ")";
+
         const int head_group_num = (local_head_num + Cfg::kHeadsPerWarp - 1) / Cfg::kHeadsPerWarp;
         const int total_warps    = token_num * head_group_num;
         dim3      grid((total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
         prepareQKVKernel<T, HD><<<grid, kWarpsPerBlock * WARP_SIZE, 0, stream>>>(
-            qkv, kv, qkv_bias, rotary_pos_emb, mapped_idx, token_num, local_head_num, head_group_num);
+            qkv, kv, qkv_bias, rotary_pos_emb, mapped_idx, token_num, local_head_num, head_group_num, rope_head_dim);
     };
 
     switch (head_dim) {
@@ -168,6 +188,8 @@ void dispatchPrepareQKV(T*           qkv,
             return invoke(std::integral_constant<int, 64>{});
         case 72:
             return invoke(std::integral_constant<int, 72>{});
+        case 128:
+            return invoke(std::integral_constant<int, 128>{});
         default:
             TM_CHECK(0) << "unsupported Qwen3.5 ViT head_dim for qkv preprocess: " << head_dim;
     }
@@ -184,6 +206,7 @@ void invokeQwen3_5VitPrepareQKV(void*        qkv,
                                 int          token_num,
                                 int          local_head_num,
                                 int          head_dim,
+                                int          rope_head_dim,
                                 cudaStream_t stream)
 {
     if (token_num == 0) {
@@ -200,6 +223,7 @@ void invokeQwen3_5VitPrepareQKV(void*        qkv,
                            token_num,
                            local_head_num,
                            head_dim,
+                           rope_head_dim,
                            stream);
     };
 

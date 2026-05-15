@@ -763,13 +763,15 @@ struct Qwen3_5Vit::Impl {
     template<typename T>
     void Attn(Tensor& input, Tensor& output, Data& d, int layer_id, const Tensor& rotary_pos_emb)
     {
-        auto* attn = weights_.block(layer_id)->attention.get();
+        auto& vit_cfg = weights_.config();
+        auto* attn    = weights_.block(layer_id)->attention.get();
 
         Tensor qkv = linear_.Forward(input, *attn->w_qkv);
         sync_check_cuda_error();
 
         const int local_head_num = attn->head_num / attn->tp_size;
-        const int head_dim       = attn->head_dim;
+        const int head_dim       = attn->head_dim;                         // may be padded
+        const int rope_head_dim  = vit_cfg.hidden_dim / vit_cfg.head_num;  // model's real per-head dim
         const int token_num      = d.batch_size;
 
         Tensor tmp_kv{{local_head_num, 2, d.batch_size, head_dim}, qkv.dtype(), qkv.device()};
@@ -782,6 +784,7 @@ struct Qwen3_5Vit::Impl {
                                    token_num,
                                    local_head_num,
                                    head_dim,
+                                   rope_head_dim,
                                    core::Context::stream().handle());
         sync_check_cuda_error();
 

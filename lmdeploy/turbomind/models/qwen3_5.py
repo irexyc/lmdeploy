@@ -11,7 +11,10 @@ transformer blocks and merger linears shard with the model TP group.
 """
 from __future__ import annotations
 
+import math
+
 import _turbomind as _tm
+import torch
 from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
 
@@ -25,11 +28,71 @@ from ..builders import (
     VisualModelBuilder,
     make_layer_norm_config,
 )
-from ..linear import Linear, transform_output_dim
+from ..linear import Linear, transform_input_dim, transform_output_dim
 from ..weight_format import TrivialFormat
-from .base import INPUT_MODELS
 from ._qwen3_5 import _Qwen3_5Model
+from .base import INPUT_MODELS
 from .utils import reorder_rotary_emb
+
+# Explicit map: ViT head_dim -> kernel-supported head_dim. The attention
+# kernel only ships {64,128,192,256,576} and impl_16816.h requires
+# head_dim % 16 == 0, so head_dim=72 (Qwen3.5-27B ViT) is zero-padded
+# per-head to 128. Other dims must be added here deliberately — we don't
+# auto-round-up because the next-supported jump can be large.
+_VIT_HEAD_DIM_PADDED = {
+    64:  64,    # <=2B: native
+    72:  128,   # >=9B: pad to nearest kernel-supported dim
+}
+
+
+def _padded_vit_head_dim(real_hd: int) -> int:
+    if real_hd not in _VIT_HEAD_DIM_PADDED:
+        raise NotImplementedError(
+            f'Qwen3.5 ViT head_dim={real_hd} not supported; '
+            f'known: {sorted(_VIT_HEAD_DIM_PADDED)}')
+    return _VIT_HEAD_DIM_PADDED[real_hd]
+
+
+def _assert_trivial(linear: Linear, name: str) -> None:
+    """Padding only handles trivial weights for now.
+
+    Callers must gate this on `padded_hd != real_hd` so quantized 2B-style paths stay untouched.
+    """
+    if not isinstance(linear.weight_format, TrivialFormat):
+        raise NotImplementedError(
+            f'ViT {name} weight is {type(linear.weight_format).__name__}; '
+            f'head_dim padding currently supports TrivialFormat only '
+            f'(dequant ViT before padding).')
+
+
+@transform_output_dim
+def _pad_head_dim_out(t: torch.Tensor, *, num_heads: int, src_hd: int,
+                      dst_hd: int) -> torch.Tensor:
+    """Pad each head's OUTPUT block from src_hd to dst_hd; num_heads unchanged.
+
+    Applied to Q/K/V projections: weight (in_dim, num_heads*src_hd) becomes (in_dim, num_heads*dst_hd) with the new
+    [src_hd, dst_hd) slice zeroed. The @transform_output_dim decorator handles bias by promoting it to 2-D and squeezing
+    back, so the bias is padded the same way as weight.
+    """
+    rest = t.shape[:-1]
+    t = t.reshape(rest + (num_heads, src_hd))
+    pad = t.new_zeros(rest + (num_heads, dst_hd - src_hd))
+    return torch.cat([t, pad], dim=-1).reshape(rest + (num_heads * dst_hd,))
+
+
+@transform_input_dim
+def _pad_head_dim_in(t: torch.Tensor, *, num_heads: int, src_hd: int,
+                     dst_hd: int) -> torch.Tensor:
+    """Pad each head's INPUT block from src_hd to dst_hd; num_heads unchanged.
+
+    Applied to the wo projection: weight (num_heads*src_hd, out_dim) becomes
+    (num_heads*dst_hd, out_dim). The @transform_input_dim decorator passes
+    1-D tensors (wo bias, which lives on the OUTPUT axis) through unchanged.
+    """
+    rest = t.shape[1:]
+    t = t.reshape((num_heads, src_hd) + rest)
+    pad = t.new_zeros((num_heads, dst_hd - src_hd) + rest)
+    return torch.cat([t, pad], dim=1).reshape((num_heads * dst_hd,) + rest)
 
 
 @transform_output_dim
@@ -161,32 +224,55 @@ class Qwen3_5Model(_Qwen3_5Model):
         return b.build()
 
     def _make_visual_attn_cfg(self):
+        real_hd = self._vis_hidden // self._vis_heads
+        padded_hd = _padded_vit_head_dim(real_hd)
         cfg = _tm.AttentionConfig()
         cfg.data_type = self._resolver.data_type
         cfg.hidden_dim = self._vis_hidden
-        cfg.head_dim = self._vis_hidden // self._vis_heads
+        cfg.head_dim = padded_hd
         cfg.head_num = self._vis_heads
         cfg.kv_head_num = self._vis_heads
         cfg.window_size = 0
         cfg.causal = False
-        cfg.softmax_scale = 0.0
+        # When we pad head_dim, the softmax scale must stay tied to the
+        # real head_dim — the padded slice contributes zero to QK^T, so the
+        # math is equivalent to head_dim=real_hd. Setting softmax_scale != 0
+        # bypasses the runtime's `1/sqrt(attn.head_dim)` fallback.
+        cfg.softmax_scale = (1.0 / math.sqrt(real_hd)
+                             if padded_hd != real_hd else 0.0)
         return cfg
 
     def vit_attn(self, pfx):
         cfg = self._make_visual_attn_cfg()
+        real_hd = self._vis_hidden // self._vis_heads
+        padded_hd = cfg.head_dim
+        H = cfg.head_num
+
         q, k, v = _split_packed_visual_qkv(self._linear(pfx + 'qkv'))
 
         # Qwen3.5 ViT applies RoPE before invoking the attention kernel.
         # Reorder Q/K once at export time so the runtime can use the same
         # adjacent-pair RoPE layout as TurboMind's attention kernels.
-        q = reorder_rotary_emb(q, cfg.head_dim, cfg.head_dim,
-                               resolver=self._resolver)
-        k = reorder_rotary_emb(k, cfg.head_dim, cfg.head_dim,
-                               resolver=self._resolver)
+        # RoPE is computed at the real head_dim regardless of padding.
+        q = reorder_rotary_emb(q, real_hd, real_hd, resolver=self._resolver)
+        k = reorder_rotary_emb(k, real_hd, real_hd, resolver=self._resolver)
+
+        proj = self._linear(pfx + 'proj')
+
+        # Only force TrivialFormat on the padded path; the native-head_dim
+        # path keeps the existing quantized/non-quantized behavior intact.
+        if padded_hd != real_hd:
+            for ln, name in [(q, 'q'), (k, 'k'), (v, 'v'), (proj, 'proj')]:
+                _assert_trivial(ln, name)
+            pad_kwargs = dict(num_heads=H, src_hd=real_hd, dst_hd=padded_hd)
+            q = _pad_head_dim_out(q, **pad_kwargs)
+            k = _pad_head_dim_out(k, **pad_kwargs)
+            v = _pad_head_dim_out(v, **pad_kwargs)
+            proj = _pad_head_dim_in(proj, **pad_kwargs)
 
         m = AttentionBuilder(cfg, self._ctx, tp=self._model_tp)
         m.add_qkv_proj(q, k, v)
-        m.add_o_proj(self._linear(pfx + 'proj'))
+        m.add_o_proj(proj)
         return m.build()
 
     # ------------------------------------------------------------------
